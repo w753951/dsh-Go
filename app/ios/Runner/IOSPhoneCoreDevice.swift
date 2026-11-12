@@ -634,13 +634,39 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     }
   }
 
+  /// 读本进程自己的 entitlements。越狱构建里可能只带 HID 权限而不带 no-sandbox，
+  /// 那种情况下读不到 /var/jb，但注入能力是有的。
+  private static func hasHIDEntitlement() -> Bool {
+    typealias CreateTask = @convention(c) (CFAllocator?) -> CFTypeRef?
+    typealias CopyValue = @convention(c) (CFTypeRef?, CFString, UnsafeMutableRawPointer?) -> CFTypeRef?
+    guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW) else {
+      return false
+    }
+    defer { dlclose(handle) }
+    guard let rawCreate = dlsym(handle, "SecTaskCreateFromSelf"),
+          let rawCopy = dlsym(handle, "SecTaskCopyValueForEntitlement") else { return false }
+    let create = unsafeBitCast(rawCreate, to: CreateTask.self)
+    let copy = unsafeBitCast(rawCopy, to: CopyValue.self)
+    guard let task = create(kCFAllocatorDefault) else { return false }
+    let keys = ["com.apple.private.hid.client.event-dispatch",
+                "com.apple.private.security.no-sandbox"]
+    for key in keys {
+      if let value = copy(task, key as CFString, nil) {
+        if CFGetTypeID(value) == CFBooleanGetTypeID(),
+           CFBooleanGetValue((value as! CFBoolean)) { return true }
+        if CFGetTypeID(value) == CFStringGetTypeID() { return true }
+      }
+    }
+    return false
+  }
+
   /// 通道是否可用。符号、权限、私有框架三者都要在。
   ///
-  /// 顺序很重要：先做纯文件系统探测，没有越狱权限就直接返回，
-  /// 完全不碰 `symbols`（它会 dlopen IOKit）。否则普通沙盒里的
-  /// 每一次启动都会白白加载一套私有框架，只会增加风险。
+  /// 顺序很重要：先做纯文件系统探测和 entitlement 读取，都没有就直接返回，
+  /// 完全不碰 `symbols`（它会 dlopen IOKit）。否则普通沙盒里的每一次启动
+  /// 都会白白加载一套私有框架，只会增加风险。
   static func available() -> Bool {
-    guard processHasJailbreakPrivilege() else { return false }
+    guard processHasJailbreakPrivilege() || hasHIDEntitlement() else { return false }
     let s = symbols
     guard s.screenImage != nil, s.hidCreate != nil,
           s.hidSystemCreate != nil, s.hidDispatch != nil else { return false }
