@@ -92,30 +92,23 @@ jobs:
         working-directory: app
         run: bash ../tooling/ios/build.sh --release --no-codesign
 
-      - name: Sign with jailbreak entitlements
+      - name: Sign the runner with jailbreak entitlements
         run: |
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
           ent="app/ios/Runner/Runner.jailbreak.entitlements"
           test -f "$ent" || { echo '::error title=entitlements::the jailbreak entitlements file is missing'; exit 1; }
-          # TrollStore 会读取主二进制里的 entitlements 再自行签名，所以先把
-          # platform-application / no-sandbox 写进 Runner 本身。
+          # 只签主二进制。TrollStore 从 Runner 读 entitlements 后再签整包，
+          # 嵌套 framework 留给它处理。绝不能对 App.framework/App 跑 ldid：
+          # Dart AOT 快照被重签后校验失败，Flutter 启动即 abort。
           "$LLDID" -S"$ent" "$app/Runner"
           echo "=== Runner entitlements ==="
           "$LLDID" -e "$app/Runner"
-          # 嵌套 framework 与 dylib 一起签，真机 dyld 才肯加载。
-          for fw in "$app"/Frameworks/*.framework; do
-            [ -d "$fw" ] || continue
-            name="$(basename "$fw" .framework)"
-            [ -f "$fw/$name" ] && "$LLDID" -S"$ent" "$fw/$name" || true
-          done
-          for lib in "$app"/Frameworks/*.dylib; do
-            [ -f "$lib" ] && "$LLDID" -S"$ent" "$lib" || true
-          done
-          echo "=== verify: no unsigned main binary ==="
           "$LLDID" -e "$app/Runner" | grep -q 'platform-application' \
             || { echo '::error title=entitlements::platform-application did not land in Runner'; exit 1; }
+          echo "=== frameworks left for TrollStore to sign ==="
+          ls "$app/Frameworks"
       - name: Package the unsigned ipa
         run: |
           app="app/build/ios/iphoneos/Runner.app"
