@@ -6,8 +6,6 @@
 	<array>
 		<string>group.io.github.ccch1mneyyy.dshgo</string>
 	</array>
-	<key>platform-application</key>
-	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.hid.client.event-dispatch</key>
