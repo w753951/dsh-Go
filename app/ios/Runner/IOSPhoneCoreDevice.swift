@@ -589,6 +589,7 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     let hidCreate: (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt32, UInt32,
                                    UInt32, UInt32, UInt32, UInt8,
                                    Double, Double, Double, Double, UInt32, UInt32) -> Unmanaged<CFTypeRef>?)?
+    let hidKeyCreate: (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt8, UInt32) -> Unmanaged<CFTypeRef>?)?
     let hidSetFloat: (@convention(c) (CFTypeRef, UInt32, Double) -> Void)?
     let hidSystemCreate: (@convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?)?
     let hidDispatch: (@convention(c) (CFTypeRef, CFTypeRef) -> Void)?
@@ -618,6 +619,9 @@ final class IOSJailbreakDevice: @unchecked Sendable {
         [iokit, main]),
       hidSetFloat: look("IOHIDEventSetFloatValue", (@convention(c) (CFTypeRef, UInt32, Double) -> Void).self,
         [iokit, main]),
+      hidKeyCreate: look("IOHIDEventCreateKeyboardEvent",
+        (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt8, UInt32) -> Unmanaged<CFTypeRef>?).self,
+        [iokit, main]),
       hidSystemCreate: look("IOHIDEventSystemClientCreate",
         (@convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?).self, [iokit, main]),
       hidDispatch: look("IOHIDEventSystemClientDispatchEvent",
@@ -627,7 +631,7 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   /// 提供给上层的实际能力。只有这里声明 true 的动作才会被允许派发。
   /// 文本输入（ascii/paste）依赖剪贴板 staging 与回前台流程，第一版不声明。
   static func capabilities() -> [String: Bool] {
-    ["touch": true, "key": true, "launch": true, "apps": true]
+    ["touch": true, "key": true, "launch": true, "apps": true, "type": true]
   }
 
   /// 越狱权限探测：带 no-sandbox 时进程能读到越狱根目录。
@@ -772,9 +776,7 @@ final class IOSJailbreakDevice: @unchecked Sendable {
       return Outcome(status: 0, metadata: Self.json(["outcome": "read"]), bytes: nil)
     case "paste", "ascii":
       // 文本输入依赖剪贴板 staging 和回到前台，第一版不声称支持。
-      return Outcome(status: 1,
-                     metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]),
-                     bytes: nil)
+      return asciiOrPaste(op, values)
     default:
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
     }
@@ -963,6 +965,102 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     }
     if let end = digitizer(x: to.x, y: to.y, touched: false) { send(end) }
     return true
+  }
+
+  // MARK: - 键盘输入
+
+  /// US 布局的 HID 使用码。中文等非 ASCII 字符走剪贴板粘贴，不在这里。
+  private static let keyMap: [Character: (usage: UInt32, shift: Bool)] = [
+    "a": (0x04, false), "b": (0x05, false), "c": (0x06, false), "d": (0x07, false),
+    "e": (0x08, false), "f": (0x09, false), "g": (0x0A, false), "h": (0x0B, false),
+    "i": (0x0C, false), "j": (0x0D, false), "k": (0x0E, false), "l": (0x0F, false),
+    "m": (0x10, false), "n": (0x11, false), "o": (0x12, false), "p": (0x13, false),
+    "q": (0x14, false), "r": (0x15, false), "s": (0x16, false), "t": (0x17, false),
+    "u": (0x18, false), "v": (0x19, false), "w": (0x1A, false), "x": (0x1B, false),
+    "y": (0x1C, false), "z": (0x1D, false),
+    "1": (0x1E, false), "2": (0x1F, false), "3": (0x20, false), "4": (0x21, false),
+    "5": (0x22, false), "6": (0x23, false), "7": (0x24, false), "8": (0x25, false),
+    "9": (0x26, false), "0": (0x27, false),
+    " ": (0x2C, false), "-": (0x2D, false), "=": (0x2E, false), "[": (0x2F, false),
+    "]": (0x30, false), "\\": (0x31, false), ";": (0x33, false), "'": (0x34, false),
+    "`": (0x35, false), ",": (0x36, false), ".": (0x37, false), "/": (0x38, false),
+    "A": (0x04, true), "B": (0x05, true), "C": (0x06, true), "D": (0x07, true),
+    "E": (0x08, true), "F": (0x09, true), "G": (0x0A, true), "H": (0x0B, true),
+    "I": (0x0C, true), "J": (0x0D, true), "K": (0x0E, true), "L": (0x0F, true),
+    "M": (0x10, true), "N": (0x11, true), "O": (0x12, true), "P": (0x13, true),
+    "Q": (0x14, true), "R": (0x15, true), "S": (0x16, true), "T": (0x17, true),
+    "U": (0x18, true), "V": (0x19, true), "W": (0x1A, true), "X": (0x1B, true),
+    "Y": (0x1C, true), "Z": (0x1D, true),
+    "!": (0x1E, true), "@": (0x1F, true), "#": (0x20, true), "$": (0x21, true),
+    "%": (0x22, true), "^": (0x23, true), "&": (0x24, true), "*": (0x25, true),
+    "(": (0x26, true), ")": (0x27, true), "_": (0x2D, true), "+": (0x2E, true),
+    "{": (0x2F, true), "}": (0x30, true), "|": (0x31, true), ":": (0x33, true),
+    "\"": (0x34, true), "~": (0x35, true), "<": (0x36, true), ">": (0x37, true),
+    "?": (0x38, true),
+  ]
+
+  private static let keyReturn: UInt32 = 0x28
+  private static let keyShift: UInt32 = 0xE1
+  private static let keyCommand: UInt32 = 0xE3
+
+  private func keyEvent(_ usage: UInt32, down: Bool) -> CFTypeRef? {
+    guard let create = Self.symbols.hidKeyCreate else { return nil }
+    return create(kCFAllocatorDefault, mach_absolute_time(), 0x07, usage, down ? 1 : 0, 0)?.takeRetainedValue()
+  }
+
+  /// 按下并松开一个键；需要 Shift 时把左右 Shift 一起按下再抬起。
+  private func pressKey(_ usage: UInt32, shift: Bool) {
+    if shift, let modifier = keyEvent(Self.keyShift, down: true) { send(modifier) }
+    if let down = keyEvent(usage, down: true) { send(down) }
+    usleep(12_000)
+    if let up = keyEvent(usage, down: false) { send(up) }
+    if shift, let modifier = keyEvent(Self.keyShift, down: false) { send(modifier) }
+    usleep(12_000)
+  }
+
+  private func typeText(_ text: String) -> Bool {
+    guard Self.symbols.hidKeyCreate != nil else { return false }
+    var typed = 0
+    for character in text {
+      if character == "\n" {
+        pressKey(Self.keyReturn, shift: false)
+        typed += 1
+        continue
+      }
+      guard let mapped = Self.keyMap[character] else { continue }
+      pressKey(mapped.usage, shift: mapped.shift)
+      typed += 1
+    }
+    return typed > 0
+  }
+
+  /// 中文等非 ASCII 文本靠这里：调用方已经把文字放进剪贴板，这里只发 ⌘V。
+  private func pasteClipboard() -> Bool {
+    guard Self.symbols.hidKeyCreate != nil else { return false }
+    if let command = keyEvent(Self.keyCommand, down: true) { send(command) }
+    usleep(20_000)
+    if let v = keyEvent(0x19, down: true) { send(v) }
+    usleep(20_000)
+    if let v = keyEvent(0x19, down: false) { send(v) }
+    usleep(20_000)
+    if let command = keyEvent(Self.keyCommand, down: false) { send(command) }
+    return true
+  }
+
+  private func asciiOrPaste(_ op: String, _ values: [String: Any]) -> Outcome {
+    let ok: Bool
+    if op == "paste" {
+      ok = pasteClipboard()
+    } else {
+      guard let text = values["text"] as? String, !text.isEmpty else {
+        return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+      }
+      ok = typeText(text)
+    }
+    guard ok else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
   }
 
   // MARK: - SpringBoard 私有接口
