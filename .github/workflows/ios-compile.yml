@@ -96,37 +96,41 @@ jobs:
         run: |
           app="app/build/ios/iphoneos/Runner.app"
           test -d "$app" || { echo '::error title=ipa::no Runner.app was produced'; exit 1; }
-          rm -rf "$RUNNER_TEMP/plain"
-          mkdir -p "$RUNNER_TEMP/plain/Payload"
+          rm -rf "$RUNNER_TEMP/plain"; mkdir -p "$RUNNER_TEMP/plain/Payload"
           cp -R "$app" "$RUNNER_TEMP/plain/Payload/"
           (cd "$RUNNER_TEMP/plain" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-plain.ipa")
+          shasum -a 256 "$RUNNER_TEMP/plain/Payload/Runner.app/Runner"
 
-      - name: Sign variants and package them
+      - name: Sign with codesign and ldid, package both
         run: |
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
-          entA="app/ios/Runner/Runner.jailbreak.entitlements"
-          entB="app/ios/Runner/Runner.signedonly.entitlements"
-          test -f "$entA" || { echo '::error title=entitlements::variant A is missing'; exit 1; }
-          test -f "$entB" || { echo '::error title=entitlements::variant B is missing'; exit 1; }
+          ent="app/ios/Runner/Runner.jailbreak.entitlements"
+          test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
 
-          # B：只签名，权限和原版一致，用来判断 ldid 签名本身是否安全。
-          cp -R "$app" "$RUNNER_TEMP/appB"
-          "$LLDID" -S"$entB" "$RUNNER_TEMP/appB/Runner"
-          rm -rf "$RUNNER_TEMP/ipB"; mkdir -p "$RUNNER_TEMP/ipB/Payload"
-          cp -R "$RUNNER_TEMP/appB" "$RUNNER_TEMP/ipB/Payload/Runner.app"
-          (cd "$RUNNER_TEMP/ipB" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-signedonly.ipa")
-          echo "=== variant B entitlements ==="; "$LLDID" -e "$RUNNER_TEMP/appB/Runner"
+          # A：codesign（Apple 自家工具，只加 LC_CODE_SIGNATURE，不改别的段）
+          cp -R "$app" "$RUNNER_TEMP/appC"
+          codesign -f -s - --entitlements "$ent" "$RUNNER_TEMP/appC/Runner"
+          echo "=== codesign entitlements ==="
+          codesign -d --entitlements :- "$RUNNER_TEMP/appC/Runner" 2>/dev/null || codesign -d --entitlements - "$RUNNER_TEMP/appC/Runner" 2>&1 | head -40
+          rm -rf "$RUNNER_TEMP/ipC"; mkdir -p "$RUNNER_TEMP/ipC/Payload"
+          cp -R "$RUNNER_TEMP/appC" "$RUNNER_TEMP/ipC/Payload/Runner.app"
+          (cd "$RUNNER_TEMP/ipC" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-codesign.ipa")
+          shasum -a 256 "$RUNNER_TEMP/appC/Runner"
 
-          # A：no-sandbox + hid，不带 platform-application。
-          cp -R "$app" "$RUNNER_TEMP/appA"
-          "$LLDID" -S"$entA" "$RUNNER_TEMP/appA/Runner"
-          rm -rf "$RUNNER_TEMP/ipA"; mkdir -p "$RUNNER_TEMP/ipA/Payload"
-          cp -R "$RUNNER_TEMP/appA" "$RUNNER_TEMP/ipA/Payload/Runner.app"
-          (cd "$RUNNER_TEMP/ipA" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-nosandbox.ipa")
-          echo "=== variant A entitlements ==="; "$LLDID" -e "$RUNNER_TEMP/appA/Runner"
+          # B：ldid（对照，确认是不是它破坏了二进制）
+          cp -R "$app" "$RUNNER_TEMP/appL"
+          "$LLDID" -S"$ent" "$RUNNER_TEMP/appL/Runner"
+          echo "=== ldid entitlements ==="
+          "$LLDID" -e "$RUNNER_TEMP/appL/Runner" | head -20
+          rm -rf "$RUNNER_TEMP/ipL"; mkdir -p "$RUNNER_TEMP/ipL/Payload"
+          cp -R "$RUNNER_TEMP/appL" "$RUNNER_TEMP/ipL/Payload/Runner.app"
+          (cd "$RUNNER_TEMP/ipL" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-ldid.ipa")
+          shasum -a 256 "$RUNNER_TEMP/appL/Runner"
 
+          echo "=== size compare ==="
+          ls -l "$RUNNER_TEMP/appC/Runner" "$RUNNER_TEMP/appL/Runner" "$RUNNER_TEMP/plain/Payload/Runner.app/Runner"
           du -h "$RUNNER_TEMP"/DSH-Go-*.ipa
 
       - name: Upload every ipa
@@ -136,8 +140,8 @@ jobs:
           name: ios-ipa
           path: |
             ${{ runner.temp }}/DSH-Go-plain.ipa
-            ${{ runner.temp }}/DSH-Go-signedonly.ipa
-            ${{ runner.temp }}/DSH-Go-nosandbox.ipa
+            ${{ runner.temp }}/DSH-Go-codesign.ipa
+            ${{ runner.temp }}/DSH-Go-ldid.ipa
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
