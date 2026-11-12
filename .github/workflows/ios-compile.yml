@@ -92,6 +92,30 @@ jobs:
         working-directory: app
         run: bash ../tooling/ios/build.sh --release --no-codesign
 
+      - name: Bundle the built-in plugin
+        run: |
+          app="app/build/ios/iphoneos/Runner.app"
+          dest="$app/builtin-plugins/dsh-our-free-model"
+          mkdir -p "$dest"
+          # 按插件自己的 files 清单取；win32 引擎分片 iOS 用不上，去掉省 31 MB。
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ofm.tar.gz" \
+            https://codeload.github.com/Ebony-Vinyl/dsh-our-free-model/tar.gz/refs/heads/main
+          mkdir -p "$RUNNER_TEMP/ofm"
+          tar -xzf "$RUNNER_TEMP/ofm.tar.gz" -C "$RUNNER_TEMP/ofm" --strip-components=1
+          src="$RUNNER_TEMP/ofm"
+          for item in index.js client.js adapter locale icon.svg cordis.patch.yml LICENSE package.json; do
+            [ -e "$src/$item" ] && cp -R "$src/$item" "$dest/" || true
+          done
+          mkdir -p "$dest/src"
+          find "$src/src" -maxdepth 1 -name '*.js' -exec cp {} "$dest/src/" \;
+          for dir in providers route; do
+            [ -d "$src/src/$dir" ] && cp -R "$src/src/$dir" "$dest/src/" || true
+          done
+          mkdir -p "$dest/vendor"
+          [ -d "$src/vendor/channel-pack" ] && cp -R "$src/vendor/channel-pack" "$dest/vendor/" || true
+          [ -d "$src/vendor/magpie" ] && cp -R "$src/vendor/magpie" "$dest/vendor/" || true
+          test -f "$dest/index.js" || { echo '::error title=plugin::the built-in plugin did not land'; exit 1; }
+          echo "built-in plugin size: $(du -sh "$dest" | cut -f1)"
       - name: Package the plain ipa
         run: |
           app="app/build/ios/iphoneos/Runner.app"
