@@ -625,9 +625,9 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   }()
 
   /// 提供给上层的实际能力。只有这里声明 true 的动作才会被允许派发。
-  /// 输入（ascii/paste）依赖剪贴板 staging 与回前台流程，第一版明确不声明。
+  /// 文本输入（ascii/paste）依赖剪贴板 staging 与回前台流程，第一版不声明。
   static func capabilities() -> [String: Bool] {
-    ["touch": true, "key": true, "launch": true, "apps": false]
+    ["touch": true, "key": true, "launch": true, "apps": true]
   }
 
   /// 越狱权限探测：带 no-sandbox 时进程能读到越狱根目录。
@@ -766,6 +766,15 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     case "swipe": return swipe(values)
     case "key": return key(values)
     case "launch": return launch(values)
+    case "prepareInput":
+      // 上层在读屏/打开应用前先发这个，用来确认输入通道可用。
+      // 越狱通道直接注入 HID，没有需要预热的输入服务，回执成功即可。
+      return Outcome(status: 0, metadata: Self.json(["outcome": "read"]), bytes: nil)
+    case "paste", "ascii":
+      // 文本输入依赖剪贴板 staging 和回到前台，第一版不声称支持。
+      return Outcome(status: 1,
+                     metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]),
+                     bytes: nil)
     default:
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
     }
@@ -793,11 +802,44 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   }
 
   private func apps() -> Outcome {
-    let payload: [String: Any] = ["apps": [[String: Any]](), "generatedAt": Date().timeIntervalSince1970]
+    // 上层按 [String: [[String: String]]] 严格解码，多一个非字符串字典的键
+    // 就会整体解码失败并报 ERR_PHONE_CORE_PROTOCOL，所以这里只放 apps。
+    let payload: [String: Any] = ["apps": installedApplications()]
     guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
     }
     return Outcome(status: 0, metadata: Self.json(["outcome": "read", "kind": "apps"]), bytes: data)
+  }
+
+  /// 用 LSApplicationWorkspace 列已装应用。
+  ///
+  /// 这条私有接口不依赖文件系统权限，所以没有 no-sandbox 也能拿到列表，
+  /// 上层才能把「微信」这种名字解析成 bundle id。
+  private func installedApplications() -> [[String: String]] {
+    guard let handle = dlopen(nil, RTLD_NOW), let rawSend = dlsym(handle, "objc_msgSend") else {
+      return []
+    }
+    typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
+    typealias MsgSend1 = @convention(c) (AnyObject, Selector, AnyObject?) -> AnyObject?
+    let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
+    let send1 = unsafeBitCast(rawSend, to: MsgSend1.self)
+
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return [] }
+    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return [] }
+    guard let list = send1(workspace, NSSelectorFromString("allInstalledApplications"), nil) as? [AnyObject] else {
+      return []
+    }
+    let idSelector = NSSelectorFromString("bundleIdentifier")
+    let nameSelector = NSSelectorFromString("localizedName")
+    var result: [[String: String]] = []
+    result.reserveCapacity(list.count)
+    for item in list {
+      guard let identifier = send0(item, idSelector) as? String, !identifier.isEmpty,
+            identifier.utf8.count <= 255 else { continue }
+      let name = (send0(item, nameSelector) as? String).flatMap { $0.isEmpty ? nil : $0 } ?? identifier
+      result.append(["name": name, "id": identifier])
+    }
+    return result.sorted { ($0["name"] ?? "") < ($1["name"] ?? "") }
   }
 
   private func tap(_ values: [String: Any]) -> Outcome {
