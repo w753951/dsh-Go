@@ -92,6 +92,18 @@ jobs:
         working-directory: app
         run: bash ../tooling/ios/build.sh --release --no-codesign
 
+      - name: Package the plain ipa
+        run: |
+          app="app/build/ios/iphoneos/Runner.app"
+          test -d "$app" || { echo '::error title=ipa::no Runner.app was produced'; exit 1; }
+          echo "Frameworks embedded:"
+          ls "$app/Frameworks"
+          rm -rf "$RUNNER_TEMP/plain"
+          mkdir -p "$RUNNER_TEMP/plain/Payload"
+          cp -R "$app" "$RUNNER_TEMP/plain/Payload/"
+          (cd "$RUNNER_TEMP/plain" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-plain.ipa")
+          du -h "$RUNNER_TEMP/DSH-Go-plain.ipa"
+
       - name: Sign the runner with jailbreak entitlements
         run: |
           brew install ldid || true
@@ -107,27 +119,25 @@ jobs:
           "$LLDID" -e "$app/Runner"
           "$LLDID" -e "$app/Runner" | grep -q 'platform-application' \
             || { echo '::error title=entitlements::platform-application did not land in Runner'; exit 1; }
-          echo "=== frameworks left for TrollStore to sign ==="
-          ls "$app/Frameworks"
-      - name: Package the unsigned ipa
+
+      - name: Package the jailbreak ipa
         run: |
           app="app/build/ios/iphoneos/Runner.app"
-          test -d "$app" || { echo '::error title=ipa::no Runner.app was produced'; exit 1; }
-          echo "Frameworks embedded:"; ls app/build/ios/iphoneos/Runner.app/Frameworks || true
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          cp -R "$app" "$RUNNER_TEMP/ipa/Payload/"
-          (cd "$RUNNER_TEMP/ipa" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-unsigned.ipa")
-          du -h "$RUNNER_TEMP/DSH-Go-unsigned.ipa"
+          rm -rf "$RUNNER_TEMP/jb"
+          mkdir -p "$RUNNER_TEMP/jb/Payload"
+          cp -R "$app" "$RUNNER_TEMP/jb/Payload/"
+          (cd "$RUNNER_TEMP/jb" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-jailbreak.ipa")
+          du -h "$RUNNER_TEMP/DSH-Go-jailbreak.ipa"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist" || true
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist" || true
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist" || true
-
-      - name: Upload the unsigned ipa
+      - name: Upload both ipas
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ios-unsigned-ipa
-          path: ${{ runner.temp }}/DSH-Go-unsigned.ipa
+          name: ios-ipa
+          path: |
+            ${{ runner.temp }}/DSH-Go-plain.ipa
+            ${{ runner.temp }}/DSH-Go-jailbreak.ipa
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
