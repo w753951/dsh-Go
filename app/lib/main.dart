@@ -8,6 +8,7 @@ import 'dev/frame_probe.dart';
 import 'diagnostics/app_error_log.dart';
 import 'launch/launch_state.dart';
 import 'launch/startup_trace.dart';
+import 'runtime/builtin_plugins.dart';
 import 'runtime/local_paths.dart';
 import 'state/locale_state.dart';
 import 'ui/common/third_party_licenses.dart';
@@ -29,6 +30,9 @@ Future<void> _startApp() async {
     StartupTrace.step('launch screen', LaunchController.begin, onLate: LaunchController.giveUp),
     StartupTrace.step('paths', LocalPaths.load),
   ]);
+  // 把随包内置的插件补进本机引擎 profile。只在 profile 已存在时动手，
+  // 失败也不影响启动。
+  await StartupTrace.step('builtin plugins', BuiltinPlugins.ensure);
   // MIT / OFL notices must ship with the APK, not just the sources.
   registerThirdPartyLicenses();
   registerFontLicenses();
