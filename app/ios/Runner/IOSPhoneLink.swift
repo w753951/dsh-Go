@@ -68,8 +68,9 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
   }
 
   func status() -> [String: Any] {
-    let available: Bool
-    if #available(iOS 17.0, *) { available = core.isAvailable } else { available = false }
+    // 越狱通道不依赖 iOS 17 的 RSD/RemoteXPC，系统版本不再是唯一门槛。
+    // core.isAvailable 仍然代表原生库在不在，越狱通道单独判断。
+    let available = core.isAvailable || IOSJailbreakDevice.available()
     return [
       "schema": 1, "enabled": enabled, "buildAvailable": available,
       "defaultBackend": "coredevice", "xctestEnabled": xctestEnabled, "appRoutes": appRoutes,
