@@ -100,31 +100,23 @@ jobs:
           cp -R "$app" "$RUNNER_TEMP/plain/Payload/"
           (cd "$RUNNER_TEMP/plain" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-plain.ipa")
 
-      - name: Sign each entitlement combination
+      - name: Sign with the HID entitlement
         run: |
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
-
-          sign_and_pack() {
-            name="$1"; ent="$2"
-            test -f "$ent" || { echo "::error title=entitlements::$name is missing"; exit 1; }
-            cp -R "$app" "$RUNNER_TEMP/app-$name"
-            "$LLDID" -S"$ent" "$RUNNER_TEMP/app-$name/Runner"
-            echo "=== $name ==="
-            "$LLDID" -e "$RUNNER_TEMP/app-$name/Runner"
-            rm -rf "$RUNNER_TEMP/ip-$name"; mkdir -p "$RUNNER_TEMP/ip-$name/Payload"
-            cp -R "$RUNNER_TEMP/app-$name" "$RUNNER_TEMP/ip-$name/Payload/Runner.app"
-            (cd "$RUNNER_TEMP/ip-$name" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-$name.ipa")
-          }
-
-          sign_and_pack hidonly "app/ios/Runner/ent-hidonly.plist"
-          sign_and_pack nosandboxonly "app/ios/Runner/ent-nosandboxonly.plist"
-          sign_and_pack signedonly "app/ios/Runner/Runner.signedonly.entitlements"
-
+          ent="app/ios/Runner/ent-hidonly.plist"
+          test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
+          cp -R "$app" "$RUNNER_TEMP/appH"
+          "$LLDID" -S"$ent" "$RUNNER_TEMP/appH/Runner"
+          echo "=== entitlements ==="
+          "$LLDID" -e "$RUNNER_TEMP/appH/Runner"
+          rm -rf "$RUNNER_TEMP/ipH"; mkdir -p "$RUNNER_TEMP/ipH/Payload"
+          cp -R "$RUNNER_TEMP/appH" "$RUNNER_TEMP/ipH/Payload/Runner.app"
+          (cd "$RUNNER_TEMP/ipH" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-hidonly.ipa")
           du -h "$RUNNER_TEMP"/DSH-Go-*.ipa
 
-      - name: Upload every ipa
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -132,8 +124,6 @@ jobs:
           path: |
             ${{ runner.temp }}/DSH-Go-plain.ipa
             ${{ runner.temp }}/DSH-Go-hidonly.ipa
-            ${{ runner.temp }}/DSH-Go-nosandboxonly.ipa
-            ${{ runner.temp }}/DSH-Go-signedonly.ipa
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
