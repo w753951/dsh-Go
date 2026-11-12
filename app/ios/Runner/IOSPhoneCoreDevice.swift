@@ -635,11 +635,16 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   }
 
   /// 通道是否可用。符号、权限、私有框架三者都要在。
+  ///
+  /// 顺序很重要：先做纯文件系统探测，没有越狱权限就直接返回，
+  /// 完全不碰 `symbols`（它会 dlopen IOKit）。否则普通沙盒里的
+  /// 每一次启动都会白白加载一套私有框架，只会增加风险。
   static func available() -> Bool {
+    guard processHasJailbreakPrivilege() else { return false }
     let s = symbols
     guard s.screenImage != nil, s.hidCreate != nil,
           s.hidSystemCreate != nil, s.hidDispatch != nil else { return false }
-    return processHasJailbreakPrivilege()
+    return true
   }
 
   // MARK: - 状态
