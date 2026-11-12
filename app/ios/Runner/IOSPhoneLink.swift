@@ -70,16 +70,30 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
   func status() -> [String: Any] {
     // 越狱通道不依赖 iOS 17 的 RSD/RemoteXPC，系统版本不再是唯一门槛。
     // core.isAvailable 仍然代表原生库在不在，越狱通道单独判断。
-    let available = core.isAvailable || IOSJailbreakDevice.available()
+    let jailbreak = IOSJailbreakDevice.available()
+    let available = core.isAvailable || jailbreak
     return [
       "schema": 1, "enabled": enabled, "buildAvailable": available,
       "defaultBackend": "coredevice", "xctestEnabled": xctestEnabled, "appRoutes": appRoutes,
-      "pairing": pairing.status(), "legacyPairingNeedsMigration": legacyPresent,
+      "pairing": pairingView(jailbreak: jailbreak), "legacyPairingNeedsMigration": legacyPresent,
       "connection": core.state, "connected": core.isReady, "lastCheck": lastCheck,
       "ddiCache": cache.status(), "operationPending": operationID != nil, "progress": progress,
       "clipboard": IOSPhoneClipboard.shared.status(),
       "consent": ["foregroundGrantMinutes": 30, "perCallRequired": true, "notificationTapApproves": false],
     ]
+  }
+
+  /// 越狱通道没有配对凭据这回事，但界面仍然按「有没有凭据」决定要不要显示
+  /// 那两个开关。这里给出一条可用的占位记录，让用户能直接把连接打开；
+  /// 真正的权限由二进制里的 HID entitlement 决定，不是这条记录。
+  private func pairingView(jailbreak: Bool) -> [String: Any] {
+    let raw = pairing.status()
+    guard jailbreak else { return raw }
+    var view = raw
+    view["present"] = true
+    view["code"] = "OK"
+    view["storage"] = "device"
+    return view
   }
 
   private func handle(_ call: FlutterMethodCall, reply: @escaping FlutterResult) {
@@ -135,7 +149,12 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
           message: "配对凭据可以连接本机开发者服务，用于读屏、触摸和输入。每次手机动作仍需单独批准；可随时关闭并清除凭据。",
           choices: [("enable", "启用"), ("cancel", "取消")])
         guard allowed == "enable", self.current(id), self.foreground else { return self.answer(false, code: "ERR_PHONE_CANCELLED") }
-        guard self.pairing.hasRecord, !self.legacyPresent else { return self.answer(false, code: "ERR_PHONE_PAIRING_REQUIRED") }
+        // 越狱通道不走 RSD，没有配对记录这回事，权限由二进制自带的
+        // HID entitlement 决定；只有原生的 CoreDevice 路线才需要凭据。
+        let jailbreak = IOSJailbreakDevice.available()
+        guard jailbreak || (self.pairing.hasRecord && !self.legacyPresent) else {
+          return self.answer(false, code: "ERR_PHONE_PAIRING_REQUIRED")
+        }
         self.invalidate(); self.defaults.set(true, forKey: "dsh.ios.phone.link.enabled")
         return self.answer(true)
       }
@@ -190,7 +209,11 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
       begin(reply) { [weak self] id in
         guard let self else { return ["ok": false, "code": "ERR_PHONE_CANCELLED"] }
         let coreOwner = "settings:" + id.uuidString
-        guard self.enabled, self.pairing.hasRecord, !self.legacyPresent else { return self.answer(false, code: "ERR_PHONE_LINK_DISABLED") }
+        guard self.enabled else { return self.answer(false, code: "ERR_PHONE_LINK_DISABLED") }
+        // 越狱通道不需要配对记录；core.prepare 内部也会按通道判断准入。
+        guard IOSJailbreakDevice.available() || (self.pairing.hasRecord && !self.legacyPresent) else {
+          return self.answer(false, code: "ERR_PHONE_LINK_DISABLED")
+        }
         guard !IOSPhoneControl.shared.hasActivePhoneTask else { return self.answer(false, code: "ERR_PHONE_BUSY") }
         if mount {
           let allowed = await self.ask(title: "准备本机开发者镜像？",
