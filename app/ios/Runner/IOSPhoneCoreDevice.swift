@@ -984,11 +984,24 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   }
 
   private func launchApplication(_ bundleID: String) -> Bool {
-    withSpringBoard { handle in
+    // 先试 SpringBoard 的私有入口，它在越狱环境下通常可用。
+    let viaSpringBoard: Bool = withSpringBoard { handle in
       guard let raw = dlsym(handle, "SBSLaunchApplicationWithIdentifier") else { return false }
       typealias Fn = @convention(c) (CFString, Bool) -> Int32
       return unsafeBitCast(raw, to: Fn.self)(bundleID as CFString, false) == 0
     } ?? false
+    if viaSpringBoard { return true }
+    // 退一步用 LSApplicationWorkspace，它同样是私有接口但不需要 SpringBoard 权限。
+    guard let main = dlopen(nil, RTLD_NOW), let rawSend = dlsym(main, "objc_msgSend") else {
+      return false
+    }
+    typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
+    typealias MsgSendBool = @convention(c) (AnyObject, Selector, AnyObject) -> Bool
+    let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
+    let sendBool = unsafeBitCast(rawSend, to: MsgSendBool.self)
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return false }
+    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return false }
+    return sendBool(workspace, NSSelectorFromString("openApplicationWithBundleID:"), bundleID as AnyObject)
   }
 
   static func json(_ values: [String: Any]) -> String {
