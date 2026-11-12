@@ -185,7 +185,10 @@ final class IOSPhoneCoreDevice: NSObject {
   func prepare(ownerID: String, allowDDIMount: Bool = false,
                current: () -> Bool) async -> Result<[String: Bool], IOSPhoneCoreFailure> {
     guard native != nil else { return .failure(.init(code: "ERR_PHONE_NATIVE_UNAVAILABLE")) }
-    guard pairing.hasRecord else { return .failure(.init(code: "ERR_PHONE_PAIRING_REQUIRED")) }
+    // 越狱通道没有配对记录这回事，准入由 IOSJailbreakDevice 自己判断。
+    guard IOSJailbreakDevice.available() || pairing.hasRecord else {
+      return .failure(.init(code: "ERR_PHONE_PAIRING_REQUIRED"))
+    }
     var observed: Run?
     while !Task.isCancelled, current() {
       if let run = observed {
@@ -372,11 +375,12 @@ final class IOSPhoneCoreDevice: NSObject {
     setState(["phase": "starting", "stage": "pairing", "code": "OK"])
     starter = Task { [weak self, weak run] in
       guard let self, let run else { return }
-      let servicePort = await self.port()
+      let jailbreak = IOSJailbreakDevice.available()
+      let servicePort = jailbreak ? 0 : await self.port()
       guard !Task.isCancelled, self.active === run, !run.stopping,
         run.pairingGeneration == self.pairing.generation, self.now() < run.deadline,
         let native = self.native else { return }
-      guard servicePort != 0 else {
+      guard jailbreak || servicePort != 0 else {
         run.failure = .init(code: "ERR_PHONE_CONFIGURATION"); run.terminal = true
         self.setState(["phase": "failed", "code": "ERR_PHONE_CONFIGURATION"]); return
       }
@@ -389,6 +393,13 @@ final class IOSPhoneCoreDevice: NSObject {
         let encoded = try JSONSerialization.data(withJSONObject: configuration)
         guard encoded.count <= 96 * 1024 else { throw IOSPhonePairingError.tooLarge }
         let (status, handle) = try { () throws -> (Int32, UInt64) in
+          // 越狱通道忽略配对记录；传空 Data 只占位，原生侧不会读它。
+          if jailbreak {
+            return native.start(run.id, encoded, Data()) { [weak self, weak run] handle, id, kind, text in
+              guard let self, let run else { return }
+              self.receive(run, handle: handle, runID: id, kind: kind, text: text)
+            }
+          }
           let record = try self.pairing.load()
           guard !record.isEmpty, record.count <= IOSPhonePairingRecord.maximumBytes else {
             throw IOSPhonePairingError.tooLarge
@@ -526,6 +537,8 @@ final class IOSPhoneCoreDevice: NSObject {
   }
 
   private static func makeNativeClient() -> NativeClient? {
+    // 越狱通道不经过 RSD/RemoteXPC，iOS 15 也能用；可用时优先于原来的两条通道。
+    if let jailbreak = IOSJailbreakDevice.makeNativeClient() { return jailbreak }
     #if DSH_PHONE_SELF_RUNNER
     guard let identity = phoneCoreString(dsh_phone_core_build_identity(), limit: 128),
       identity == "dsh-phone-core:1;idevice=3854a5df4a5a6dee71ffce4d8befc2ea356a8065" else { return nil }
@@ -552,5 +565,356 @@ final class IOSPhoneCoreDevice: NSObject {
     #else
     return nil
     #endif
+  }
+}
+
+// MARK: - 越狱通道（并入同一文件，随 Runner target 一起编译）
+
+// 越狱通道：在越狱设备上直接注入 HID 事件并抓屏，不依赖 iOS 17 的 RSD/RemoteXPC。
+//
+// 这是同一套 NativeClient 契约的第三个实现：上层的 IOSPhoneCoreActions 完全
+// 不知道底下换了一条路，配对、隧道、DDI 这些概念在这里都不存在。
+//
+// 硬性前提（缺一不可）：
+//   - 二进制带越狱权限（platform-application / no-sandbox），否则读不到 /var/jb；
+//   - UIKit 的 UIGetScreenImage 与 IOKit 的 IOHIDEvent* 符号都能解析。
+// 任何一项缺失都让整条通道不可用，绝不降级成“看起来成功”。
+
+final class IOSJailbreakDevice: @unchecked Sendable {
+  static let shared = IOSJailbreakDevice()
+
+  private struct Symbols {
+    let screenImage: (@convention(c) () -> Unmanaged<CGImage>?)?
+    let hidCreate: (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt32, UInt32,
+                                   UInt32, UInt32, UInt32, UInt8,
+                                   Double, Double, Double, Double, UInt32, UInt32) -> Unmanaged<CFTypeRef>?)?
+    let hidSetFloat: (@convention(c) (CFTypeRef, UInt32, Double) -> Void)?
+    let hidSystemCreate: (@convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?)?
+    let hidDispatch: (@convention(c) (CFTypeRef, CFTypeRef) -> Void)?
+  }
+
+  private static let symbols: Symbols = {
+    let uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW | RTLD_LOCAL)
+    let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL)
+    let main = dlopen(nil, RTLD_NOW | RTLD_LOCAL)
+
+    func look<T>(_ name: String, _ type: T.Type, _ handles: [UnsafeMutableRawPointer?]) -> T? {
+      for handle in handles {
+        guard let handle, let raw = dlsym(handle, name) else { continue }
+        return unsafeBitCast(raw, to: T.self)
+      }
+      return nil
+    }
+
+    return Symbols(
+      screenImage: look("UIGetScreenImage", (@convention(c) () -> Unmanaged<CGImage>?).self, [uikit, main]),
+      hidCreate: look("IOHIDEventCreateDigitizerEvent",
+        (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt32, UInt32,
+                         UInt32, UInt32, UInt32, UInt8,
+                         Double, Double, Double, Double, UInt32, UInt32) -> Unmanaged<CFTypeRef>?).self,
+        [iokit, main]),
+      hidSetFloat: look("IOHIDEventSetFloatValue", (@convention(c) (CFTypeRef, UInt32, Double) -> Void).self,
+        [iokit, main]),
+      hidSystemCreate: look("IOHIDEventSystemClientCreate",
+        (@convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?).self, [iokit, main]),
+      hidDispatch: look("IOHIDEventSystemClientDispatchEvent",
+        (@convention(c) (CFTypeRef, CFTypeRef) -> Void).self, [iokit, main]))
+  }()
+
+  /// 提供给上层的实际能力。只有这里声明 true 的动作才会被允许派发。
+  /// 输入（ascii/paste）依赖剪贴板 staging 与回前台流程，第一版明确不声明。
+  static func capabilities() -> [String: Bool] {
+    ["touch": true, "key": true, "launch": true, "apps": false]
+  }
+
+  /// 越狱权限探测：带 no-sandbox 时进程能读到越狱根目录。
+  private static func processHasJailbreakPrivilege() -> Bool {
+    ["/var/jb", "/var/jb/usr", "/var/jb/Library", "/private/preboot"].contains {
+      FileManager.default.fileExists(atPath: $0)
+    }
+  }
+
+  /// 通道是否可用。符号、权限、私有框架三者都要在。
+  static func available() -> Bool {
+    let s = symbols
+    guard s.screenImage != nil, s.hidCreate != nil,
+          s.hidSystemCreate != nil, s.hidDispatch != nil else { return false }
+    return processHasJailbreakPrivilege()
+  }
+
+  // MARK: - 状态
+
+  private let lock = NSLock()
+  private var nextFrame: UInt64 = 1
+  private var lastFrameID: String?
+  private var running = false
+  private var hidClient: Unmanaged<CFTypeRef>?
+  private var sink: IOSPhoneCoreDevice.EventSink?
+  private var runID: String?
+
+  private init() {}
+
+  // MARK: - NativeClient 适配
+
+  /// 越狱通道可用时替换掉 RSD 那一套；不可用返回 nil，让原有两条通道照常工作。
+  static func makeNativeClient() -> IOSPhoneCoreDevice.NativeClient? {
+    guard available() else { return nil }
+    let device = shared
+    return IOSPhoneCoreDevice.NativeClient(
+      start: { runID, _configuration, _pairing, sink in
+        device.begin(runID: runID, sink: sink)
+        return (0, 1)
+      },
+      request: { handle, requestID, data, sink in
+        guard let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+          Task { @MainActor in
+            sink(handle, requestID, 2, Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), nil)
+          }
+          return 0
+        }
+        let outcome = device.perform(values)
+        Task { @MainActor in sink(handle, requestID, outcome.status, outcome.metadata, outcome.bytes) }
+        return 0
+      },
+      cancel: { _, _ in },
+      stop: { handle in
+        device.end(handle: handle)
+      })
+  }
+
+  private func begin(runID: String, sink: @escaping IOSPhoneCoreDevice.EventSink) {
+    lock.lock()
+    self.runID = runID
+    self.sink = sink
+    running = true
+    lock.unlock()
+    // 让上层的 start 先返回并落好 handle，再宣布就绪。
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      try? await Task.sleep(nanoseconds: 40_000_000)
+      self.lock.lock()
+      let live = self.running
+      let id = self.runID
+      let callback = self.sink
+      self.lock.unlock()
+      guard live, let id, let callback else { return }
+      callback(1, id, 1, Self.json(["capabilities": Self.capabilities()]))
+    }
+  }
+
+  private func end(handle: UInt64) {
+    lock.lock()
+    let callback = sink
+    let id = runID
+    running = false
+    sink = nil
+    runID = nil
+    lock.unlock()
+    guard let callback, let id else { return }
+    Task { @MainActor in
+      callback(handle, id, 2, Self.json(["code": "OK", "cleanupConfirmed": true]))
+    }
+  }
+
+  // MARK: - 动作
+
+  private struct Outcome {
+    let status: Int32
+    let metadata: String
+    let bytes: Data?
+  }
+
+  private func perform(_ values: [String: Any]) -> Outcome {
+    guard let op = values["op"] as? String else { return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil) }
+    switch op {
+    case "screenshot": return capture()
+    case "apps": return apps()
+    case "tap": return tap(values)
+    case "swipe": return swipe(values)
+    case "key": return key(values)
+    case "launch": return launch(values)
+    default:
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
+    }
+  }
+
+  private func capture() -> Outcome {
+    guard let image = screenImage() else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
+    }
+    guard let png = image.pngData() else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
+    }
+    lock.lock()
+    let index = nextFrame
+    nextFrame &+= 1
+    let frameID = String(index)
+    lastFrameID = frameID
+    lock.unlock()
+    let w = Int(image.size.width * image.scale)
+    let h = Int(image.size.height * image.scale)
+    let meta: [String: Any] = ["outcome": "read", "kind": "screenshot",
+                              "width": w, "height": h, "nativeFrameId": frameID,
+                              "contentType": "image/png"]
+    return Outcome(status: 0, metadata: Self.json(meta), bytes: png)
+  }
+
+  private func apps() -> Outcome {
+    let payload: [String: Any] = ["apps": [[String: Any]](), "generatedAt": Date().timeIntervalSince1970]
+    guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "read", "kind": "apps"]), bytes: data)
+  }
+
+  private func tap(_ values: [String: Any]) -> Outcome {
+    guard let x = (values["x"] as? NSNumber)?.doubleValue, let y = (values["y"] as? NSNumber)?.doubleValue,
+          let size = screenSize() else {
+      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+    }
+    guard injectTap(x: CGFloat(x) * size.width, y: CGFloat(y) * size.height) else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_DISPATCH"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
+  }
+
+  private func swipe(_ values: [String: Any]) -> Outcome {
+    guard let fx = (values["fromX"] as? NSNumber)?.doubleValue, let fy = (values["fromY"] as? NSNumber)?.doubleValue,
+          let tx = (values["toX"] as? NSNumber)?.doubleValue, let ty = (values["toY"] as? NSNumber)?.doubleValue,
+          let size = screenSize() else {
+      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+    }
+    guard injectSwipe(from: CGPoint(x: fx * size.width, y: fy * size.height),
+                      to: CGPoint(x: tx * size.width, y: ty * size.height)) else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_DISPATCH"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
+  }
+
+  private func key(_ values: [String: Any]) -> Outcome {
+    guard let name = values["key"] as? String else {
+      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+    }
+    let ok: Bool
+    switch name {
+    case "home": ok = suspendFrontmost()
+    default: ok = false
+    }
+    guard ok else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
+  }
+
+  private func launch(_ values: [String: Any]) -> Outcome {
+    guard let bundleID = values["bundleId"] as? String, !bundleID.isEmpty else {
+      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+    }
+    guard launchApplication(bundleID) else {
+      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_LAUNCH"]), bytes: nil)
+    }
+    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
+  }
+
+  // MARK: - 抓屏
+
+  private func screenImage() -> UIImage? {
+    if let raw = Self.symbols.screenImage?(), let cg = raw.takeRetainedValue() as CGImage? {
+      return UIImage(cgImage: cg)
+    }
+    // 回退：只能截本 App 自己的窗口，用于证明通道起码通了一半。
+    let windows = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
+      .filter { !$0.isHidden && $0.windowLevel == .normal }
+    guard let window = windows.first, window.bounds.width > 0 else { return nil }
+    return UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+      window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+    }
+  }
+
+  private func screenSize() -> CGSize? {
+    let bounds = UIScreen.main.bounds
+    return bounds.width > 0 && bounds.height > 0 ? bounds.size : nil
+  }
+
+  // MARK: - HID 注入
+
+  private func client() -> CFTypeRef? {
+    lock.lock(); defer { lock.unlock() }
+    if let existing = hidClient { return existing.takeUnretainedValue() }
+    guard let made = Self.symbols.hidSystemCreate?(kCFAllocatorDefault) else { return nil }
+    hidClient = made
+    return made.takeUnretainedValue()
+  }
+
+  private func digitizer(x: CGFloat, y: CGFloat, touched: Bool) -> CFTypeRef? {
+    guard let create = Self.symbols.hidCreate else { return nil }
+    guard let raw = create(kCFAllocatorDefault, mach_absolute_time(),
+                           2, 0, 0, 0, 0, 0, 0, touched ? 1 : 0,
+                           Double(x), Double(y), 0, 0, 0, 0) else { return nil }
+    let event = raw.takeRetainedValue()
+    Self.symbols.hidSetFloat?(event, 0x0C, Double(x))
+    Self.symbols.hidSetFloat?(event, 0x0D, Double(y))
+    return event
+  }
+
+  private func send(_ event: CFTypeRef?) {
+    guard let event, let c = client(), let dispatch = Self.symbols.hidDispatch else { return }
+    dispatch(c, event)
+  }
+
+  private func injectTap(x: CGFloat, y: CGFloat) -> Bool {
+    guard let down = digitizer(x: x, y: y, touched: true) else { return false }
+    send(down)
+    usleep(60_000)
+    if let up = digitizer(x: x, y: y, touched: false) { send(up) }
+    return true
+  }
+
+  private func injectSwipe(from: CGPoint, to: CGPoint) -> Bool {
+    guard let start = digitizer(x: from.x, y: from.y, touched: true) else { return false }
+    send(start)
+    let steps = 12
+    for index in 1...steps {
+      let t = CGFloat(index) / CGFloat(steps)
+      if let move = digitizer(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, touched: true) {
+        send(move)
+      }
+      usleep(12_000)
+    }
+    if let end = digitizer(x: to.x, y: to.y, touched: false) { send(end) }
+    return true
+  }
+
+  // MARK: - SpringBoard 私有接口
+
+  private func withSpringBoard<T>(_ body: (UnsafeMutableRawPointer) -> T?) -> T? {
+    guard let handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                              RTLD_NOW) else { return nil }
+    defer { dlclose(handle) }
+    return body(handle)
+  }
+
+  private func suspendFrontmost() -> Bool {
+    withSpringBoard { handle in
+      guard let raw = dlsym(handle, "SBSSuspendFrontmostApplication") else { return false }
+      typealias Fn = @convention(c) (CFString) -> Void
+      unsafeBitCast(raw, to: Fn.self)("" as CFString)
+      return true
+    } ?? false
+  }
+
+  private func launchApplication(_ bundleID: String) -> Bool {
+    withSpringBoard { handle in
+      guard let raw = dlsym(handle, "SBSLaunchApplicationWithIdentifier") else { return false }
+      typealias Fn = @convention(c) (CFString, Bool) -> Int32
+      return unsafeBitCast(raw, to: Fn.self)(bundleID as CFString, false) == 0
+    } ?? false
+  }
+
+  static func json(_ values: [String: Any]) -> String {
+    guard let data = try? JSONSerialization.data(withJSONObject: values),
+          let text = String(data: data, encoding: .utf8) else { return "{}" }
+    return text
   }
 }
