@@ -585,6 +585,7 @@ final class IOSJailbreakDevice: @unchecked Sendable {
 
   private struct Symbols {
     let screenImage: (@convention(c) () -> Unmanaged<CGImage>?)?
+    let createScreenImage: (@convention(c) () -> Unmanaged<UIImage>?)?
     let hidCreate: (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt32, UInt32,
                                    UInt32, UInt32, UInt32, UInt8,
                                    Double, Double, Double, Double, UInt32, UInt32) -> Unmanaged<CFTypeRef>?)?
@@ -608,6 +609,8 @@ final class IOSJailbreakDevice: @unchecked Sendable {
 
     return Symbols(
       screenImage: look("UIGetScreenImage", (@convention(c) () -> Unmanaged<CGImage>?).self, [uikit, main]),
+      createScreenImage: look("_UICreateScreenUIImage", (@convention(c) () -> Unmanaged<UIImage>?).self,
+        [uikit, main]),
       hidCreate: look("IOHIDEventCreateDigitizerEvent",
         (@convention(c) (CFAllocator?, UInt64, UInt32, UInt32, UInt32, UInt32,
                          UInt32, UInt32, UInt32, UInt8,
@@ -660,16 +663,15 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     return false
   }
 
-  /// 通道是否可用。符号、权限、私有框架三者都要在。
+  /// 通道是否可用。
   ///
-  /// 顺序很重要：先做纯文件系统探测和 entitlement 读取，都没有就直接返回，
-  /// 完全不碰 `symbols`（它会 dlopen IOKit）。否则普通沙盒里的每一次启动
-  /// 都会白白加载一套私有框架，只会增加风险。
+  /// 只把 HID 注入所需的三个符号当硬性条件：抓屏函数在不同 iOS 版本上
+  /// 名字不一样，拿不到不该把整条通道判死。权限信号（越狱根目录或
+  /// entitlement）拿不到时也放行——真失败会由具体调用明确报错，
+  /// 总比在设置页永远打不开强。
   static func available() -> Bool {
-    guard processHasJailbreakPrivilege() || hasHIDEntitlement() else { return false }
     let s = symbols
-    guard s.screenImage != nil, s.hidCreate != nil,
-          s.hidSystemCreate != nil, s.hidDispatch != nil else { return false }
+    guard s.hidCreate != nil, s.hidSystemCreate != nil, s.hidDispatch != nil else { return false }
     return true
   }
 
@@ -850,8 +852,12 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   // MARK: - 抓屏
 
   private func screenImage() -> UIImage? {
-    if let raw = Self.symbols.screenImage?(), let cg = raw.takeRetainedValue() as CGImage? {
-      return UIImage(cgImage: cg)
+    // 越狱环境里最先试 UIKit 的私有整屏截图，它在 iOS 15 上仍然存在。
+    if let raw = Self.symbols.createScreenImage?() {
+      if let image = raw.takeRetainedValue() as UIImage? { return image }
+    }
+    if let raw = Self.symbols.screenImage?() {
+      if let cg = raw.takeRetainedValue() as CGImage? { return UIImage(cgImage: cg) }
     }
     // 回退：只能截本 App 自己的窗口，用于证明通道起码通了一半。
     let windows = UIApplication.shared.connectedScenes
