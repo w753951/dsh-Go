@@ -99,38 +99,29 @@ jobs:
           rm -rf "$RUNNER_TEMP/plain"; mkdir -p "$RUNNER_TEMP/plain/Payload"
           cp -R "$app" "$RUNNER_TEMP/plain/Payload/"
           (cd "$RUNNER_TEMP/plain" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-plain.ipa")
-          shasum -a 256 "$RUNNER_TEMP/plain/Payload/Runner.app/Runner"
 
-      - name: Sign with codesign and ldid, package both
+      - name: Sign each entitlement combination
         run: |
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
-          ent="app/ios/Runner/Runner.jailbreak.entitlements"
-          test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
 
-          # A：codesign（Apple 自家工具，只加 LC_CODE_SIGNATURE，不改别的段）
-          cp -R "$app" "$RUNNER_TEMP/appC"
-          codesign -f -s - --entitlements "$ent" "$RUNNER_TEMP/appC/Runner"
-          echo "=== codesign entitlements ==="
-          codesign -d --entitlements :- "$RUNNER_TEMP/appC/Runner" 2>/dev/null || codesign -d --entitlements - "$RUNNER_TEMP/appC/Runner" 2>&1 | head -40
-          rm -rf "$RUNNER_TEMP/ipC"; mkdir -p "$RUNNER_TEMP/ipC/Payload"
-          cp -R "$RUNNER_TEMP/appC" "$RUNNER_TEMP/ipC/Payload/Runner.app"
-          (cd "$RUNNER_TEMP/ipC" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-codesign.ipa")
-          shasum -a 256 "$RUNNER_TEMP/appC/Runner"
+          sign_and_pack() {
+            name="$1"; ent="$2"
+            test -f "$ent" || { echo "::error title=entitlements::$name is missing"; exit 1; }
+            cp -R "$app" "$RUNNER_TEMP/app-$name"
+            "$LLDID" -S"$ent" "$RUNNER_TEMP/app-$name/Runner"
+            echo "=== $name ==="
+            "$LLDID" -e "$RUNNER_TEMP/app-$name/Runner"
+            rm -rf "$RUNNER_TEMP/ip-$name"; mkdir -p "$RUNNER_TEMP/ip-$name/Payload"
+            cp -R "$RUNNER_TEMP/app-$name" "$RUNNER_TEMP/ip-$name/Payload/Runner.app"
+            (cd "$RUNNER_TEMP/ip-$name" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-$name.ipa")
+          }
 
-          # B：ldid（对照，确认是不是它破坏了二进制）
-          cp -R "$app" "$RUNNER_TEMP/appL"
-          "$LLDID" -S"$ent" "$RUNNER_TEMP/appL/Runner"
-          echo "=== ldid entitlements ==="
-          "$LLDID" -e "$RUNNER_TEMP/appL/Runner" | head -20
-          rm -rf "$RUNNER_TEMP/ipL"; mkdir -p "$RUNNER_TEMP/ipL/Payload"
-          cp -R "$RUNNER_TEMP/appL" "$RUNNER_TEMP/ipL/Payload/Runner.app"
-          (cd "$RUNNER_TEMP/ipL" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-ldid.ipa")
-          shasum -a 256 "$RUNNER_TEMP/appL/Runner"
+          sign_and_pack hidonly "app/ios/Runner/ent-hidonly.plist"
+          sign_and_pack nosandboxonly "app/ios/Runner/ent-nosandboxonly.plist"
+          sign_and_pack signedonly "app/ios/Runner/Runner.signedonly.entitlements"
 
-          echo "=== size compare ==="
-          ls -l "$RUNNER_TEMP/appC/Runner" "$RUNNER_TEMP/appL/Runner" "$RUNNER_TEMP/plain/Payload/Runner.app/Runner"
           du -h "$RUNNER_TEMP"/DSH-Go-*.ipa
 
       - name: Upload every ipa
@@ -140,8 +131,9 @@ jobs:
           name: ios-ipa
           path: |
             ${{ runner.temp }}/DSH-Go-plain.ipa
-            ${{ runner.temp }}/DSH-Go-codesign.ipa
-            ${{ runner.temp }}/DSH-Go-ldid.ipa
+            ${{ runner.temp }}/DSH-Go-hidonly.ipa
+            ${{ runner.temp }}/DSH-Go-nosandboxonly.ipa
+            ${{ runner.temp }}/DSH-Go-signedonly.ipa
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
