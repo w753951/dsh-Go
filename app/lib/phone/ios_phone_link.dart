@@ -177,6 +177,12 @@ abstract interface class PhoneLinkApi {
   Future<PhoneLinkResult> cancelPreparation();
   Future<PhoneLinkResult> restoreClipboard({bool overwriteChanged = false});
   Future<PhoneLinkResult> discardSavedClipboard();
+
+  /// 「不再逐次确认」是否已打开。
+  Future<bool> consentAlways();
+
+  /// 打开/关闭「不再逐次确认」。打开后手机动作不再弹授权页。
+  Future<PhoneLinkResult> setConsentAlways(bool enabled);
 }
 
 final class PhoneLinkChannel implements PhoneLinkApi {
@@ -228,4 +234,8 @@ final class PhoneLinkChannel implements PhoneLinkApi {
       _call('restoreClipboard', {'overwriteChanged': overwriteChanged});
   @override
   Future<PhoneLinkResult> discardSavedClipboard() => _call('discardSavedClipboard');
+  @override
+  Future<bool> consentAlways() async => await _methods.invokeMethod<bool>('consentStatus') ?? false;
+  @override
+  Future<PhoneLinkResult> setConsentAlways(bool enabled) => _call('setConsentAlways', {'enabled': enabled});
 }
