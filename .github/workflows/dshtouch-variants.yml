@@ -1,0 +1,78 @@
+# 编多个架构与签名组合，定位 Killed: 9 的真正原因。
+name: dshtouch variants
+
+on:
+  push:
+    branches: ['ios/**']
+    paths:
+      - 'tooling/ios/cli/**'
+      - '.github/workflows/dshtouch-variants.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dshtouch-variants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compile arm64 and arm64e
+        run: |
+          mkdir -p out
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for arch in arm64 arm64e; do
+            echo "=== building $arch ==="
+            xcrun --sdk iphoneos clang -arch "$arch" -fobjc-arc -O2 \
+              -isysroot "$SDK" -miphoneos-version-min=15.0 \
+              -framework Foundation -framework UIKit -framework CoreGraphics \
+              -o "out/dshtouch-$arch" tooling/ios/cli/dshtouch.m || exit 1
+            xcrun lipo "out/dshtouch-$arch" -verify_arch "$arch" || exit 1
+            xcrun vtool -show-build "out/dshtouch-$arch" || true
+          done
+          # 再做一个同时含两种架构的胖二进制
+          xcrun lipo -create -output out/dshtouch-fat out/dshtouch-arm64 out/dshtouch-arm64e
+          xcrun lipo -info out/dshtouch-fat
+          ls -lh out/
+
+      - name: Sign every variant
+        run: |
+          brew install ldid || true
+          LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict>' \
+            '  <key>platform-application</key><true/>' \
+            '  <key>com.apple.private.security.no-sandbox</key><true/>' \
+            '  <key>com.apple.private.hid.client.event-dispatch</key><true/>' \
+            '</dict></plist>' > ent.plist
+
+          for base in dshtouch-arm64 dshtouch-arm64e dshtouch-fat; do
+            # 纯 ad-hoc
+            cp "out/$base" "out/$base-plain"
+            "$LLDID" -S "out/$base-plain"
+            # 带越狱权限
+            cp "out/$base" "out/$base-ent"
+            "$LLDID" -Sent.plist "out/$base-ent"
+            echo "--- $base-ent ---"
+            "$LLDID" -e "out/$base-ent"
+          done
+          ls -lh out/
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dshtouch-variants
+          path: ${{ github.workspace }}/out/
+          if-no-files-found: error
+          retention-days: 30
