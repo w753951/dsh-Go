@@ -606,10 +606,12 @@ final class IOSPhoneCoreDevice: NSObject {
 
   /// 不需要宠物画中画也能在后台继续工作。
   ///
-  /// 真后台 tweak 保住进程时，宠物画中画不是必须的；此时允许手机操控
-  /// 跳过画中画的可用性要求，否则用户会永远卡在「请先选好宠物画中画」。
+  /// 真后台 tweak 保住进程时，宠物画中画不是必须的。这里不再要求「此刻别的
+  /// App 在前台」：那是抓屏前的检查（IOSPhoneCoreActions）负责的事，放在这里
+  /// 只会让用户在自己的聊天界面里说「读屏」时被拦住，然后被要求去开画中画。
+  /// 因此只确认设备解锁——真后台插件负责让进程活下去。
   static var backgroundKeepAliveAvailable: Bool {
-    otherAppInFront && UIApplication.shared.isProtectedDataAvailable
+    UIApplication.shared.isProtectedDataAvailable
   }
 
 }
