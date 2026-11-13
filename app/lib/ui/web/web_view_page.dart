@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -671,6 +672,22 @@ class _WebViewPageState extends State<WebViewPage> {
       code == -1009 || // 没有网络
       code == -1003;   // 找不到主机
 
+  /// 把 WebKit 的失败原因落到 App 的临时目录里（`webview-error.log`）。
+  /// 手机上没有控制台，这样人用 SSH 就能拿到确切的错误码和当时的目标地址。
+  void _logLoadFailure(int code, String description) {
+    try {
+      File('${Directory.systemTemp.path}/webview-error.log').writeAsStringSync(
+        '${DateTime.now().toIso8601String()} code=$code '
+        'url=${widget.url.replace(queryParameters: const {})} '
+        'desc=$description\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      // 记不下来也不能影响页面本身的报错。
+    }
+  }
+
   /// A new WebView for [WebViewPage.url].
   void _open() {
     _files.invalidate();
@@ -725,6 +742,7 @@ class _WebViewPageState extends State<WebViewPage> {
                 );
               }
               if (error.isForMainFrame ?? true) {
+                _logLoadFailure(error.errorCode, error.description);
                 // 本机引擎首次启动要解压几十 MB 运行时，端口还没监听时 WebView
                 // 一头撞上去就是「连接被拒」。这里先自己退让着重试几次，
                 // 别让用户对着「页面没有打开」手点重试。
