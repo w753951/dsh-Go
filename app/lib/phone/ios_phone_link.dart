@@ -26,6 +26,7 @@ final class PhoneLinkStatus {
     this.enabled = false,
     this.xctestEnabled = false,
     this.buildAvailable = false,
+    this.jailbreak = false,
     this.pairingPresent = false,
     this.storage = PhoneLinkStorage.none,
     this.pairingCode = 'OK',
@@ -56,6 +57,10 @@ final class PhoneLinkStatus {
 
   /// This build has the native side and the phone runs iOS 17 or later. Not a connection.
   final bool buildAvailable;
+
+  /// 越狱设备上的通道：自带抓屏与 HID 注入，不需要配对凭据、开发者连接或
+  /// DDI 镜像。为 true 时设置页只留一个总开关和一句说明。
+  final bool jailbreak;
 
   /// A record is there to use. Not that pairing has been verified.
   final bool pairingPresent;
@@ -120,6 +125,7 @@ final class PhoneLinkStatus {
       enabled: map['enabled'] == true,
       xctestEnabled: map['xctestEnabled'] == true,
       buildAvailable: map['buildAvailable'] == true,
+      jailbreak: map['jailbreak'] == true,
       pairingPresent: pairing['present'] == true,
       storage: PhoneLinkStorage.values.asNameMap()[pairing['storage']] ?? PhoneLinkStorage.unknown,
       pairingCode: pairing['code'] as String? ?? 'OK',
