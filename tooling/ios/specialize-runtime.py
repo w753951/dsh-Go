@@ -120,6 +120,30 @@ WEB_COMPAT_SCRIPT = (
     b'Promise.withResolvers=function(){var res,rej;'
     b'var p=new Promise(function(a,b){res=a;rej=b});'
     b'return {promise:p,resolve:res,reject:rej}};}'
+    # AbortSignal.throwIfAborted / timeout / any（Safari 16.4 / 16.0 / 17.4）。
+    # 设置页每个 client api 都会调 signal?.throwIfAborted()，缺了它整页报
+    # "signal?.throwIfAborted is not a function"，模型、Agent 预设、插件列表
+    # 全部加载失败，左下角一直停在「重新连接中」。
+    b'if(typeof AbortSignal!=="undefined"){'
+    b'if(typeof AbortSignal.prototype.throwIfAborted!=="function"){'
+    b'AbortSignal.prototype.throwIfAborted=function(){'
+    b'if(this.aborted){'
+    b'var r;try{r=this.reason}catch(e){}'
+    b'if(r===undefined){r=new Error("Aborted");r.name="AbortError"}'
+    b'throw r}};}'
+    b'if(typeof AbortSignal.timeout!=="function"){'
+    b'AbortSignal.timeout=function(ms){'
+    b'var c=new AbortController();'
+    b'setTimeout(function(){c.abort()},ms);'
+    b'return c.signal};}'
+    b'if(typeof AbortSignal.any!=="function"){'
+    b'AbortSignal.any=function(list){'
+    b'var c=new AbortController();'
+    b'for(var i=0;i<list.length;i++){'
+    b'(function(s){if(s.aborted){c.abort();return}'
+    b's.addEventListener("abort",function(){c.abort()})})(list[i])}'
+    b'return c.signal};}'
+    b'}'
     b'})();</script>'
 )
 
