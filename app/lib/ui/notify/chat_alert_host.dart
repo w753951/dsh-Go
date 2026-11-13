@@ -43,14 +43,37 @@ class _ChatAlertHostState extends ConsumerState<ChatAlertHost> {
   static bool _onScreen(AppLifecycleState? state) =>
       state == null || state == AppLifecycleState.resumed || state == AppLifecycleState.inactive;
 
+  /// 与 Info.plist 里的 bundle id 一致。
+  static const _selfBundleID = 'io.github.ccch1mneyyy.dshgo';
+
+  /// 真后台 tweak 会让本 App 一直报 active，光看生命周期会把「人已经切到别的
+  /// App」判成「人还在本 App」，后台完成时的系统通知就永远不发。这里再问一次
+  /// 真实前台是谁；只有查不到时才退回生命周期。
+  Future<bool> _reallyOnScreen(AppLifecycleState? state) async {
+    if (!_onScreen(state)) return false;
+    try {
+      final front = await const MethodChannel('dsh/app').invokeMethod<Object?>('frontmostBundleID');
+      if (front is String && front.isNotEmpty) return front == _selfBundleID;
+    } catch (_) {
+      // 没有这个原生方法（测试、别的平台）：按生命周期走。
+    }
+    return true;
+  }
+
+  Future<void> _refreshForeground(AppLifecycleState? state) async {
+    final onScreen = await _reallyOnScreen(state);
+    if (!mounted) return;
+    ref.read(appForegroundProvider.notifier).set(onScreen);
+  }
+
   @override
   void initState() {
     super.initState();
     _lifecycle = AppLifecycleListener(
-      onStateChange: (state) => ref.read(appForegroundProvider.notifier).set(_onScreen(state)),
+      onStateChange: (state) => unawaited(_refreshForeground(state)),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(appForegroundProvider.notifier).set(_onScreen(WidgetsBinding.instance.lifecycleState));
+      if (mounted) unawaited(_refreshForeground(WidgetsBinding.instance.lifecycleState));
     });
   }
 
