@@ -566,6 +566,52 @@ final class IOSPhoneCoreDevice: NSObject {
     return nil
     #endif
   }
+  // MARK: - 真后台判断
+
+  /// 当前真正显示在屏幕上的 App 的 bundle id；查不到时返回 nil。
+  ///
+  /// 越狱设备上装了「真后台」类 tweak 时，App 切走后
+  /// `UIApplication.applicationState` 可能仍然是 active，用它判断
+  /// 「我是不是前台」会得到错误答案。这里直接问 SpringBoard 谁在前台。
+  static func frontmostBundleID() -> String? {
+    if let handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                           RTLD_NOW) {
+      defer { dlclose(handle) }
+      if let raw = dlsym(handle, "SBSCopyFrontmostApplicationDisplayIdentifier") {
+        typealias Fn = @convention(c) () -> Unmanaged<CFString>?
+        if let value = unsafeBitCast(raw, to: Fn.self)()?.takeRetainedValue() {
+          let bundle = value as String
+          if !bundle.isEmpty { return bundle }
+        }
+      }
+    }
+    // 退一步用 LSApplicationWorkspace，不需要 SpringBoard 权限。
+    guard let main = dlopen(nil, RTLD_NOW), let rawSend = dlsym(main, "objc_msgSend") else { return nil }
+    typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
+    let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return nil }
+    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return nil }
+    guard let app = send0(workspace, NSSelectorFromString("frontmostApplication")) else { return nil }
+    return send0(app, NSSelectorFromString("bundleIdentifier")) as? String
+  }
+
+  /// 别的 App 正占据屏幕——也就是 DSH Go 不在前台。
+  ///
+  /// 先看真实前台 App；查不到时退回系统状态判断。装了「真后台」tweak
+  /// 时前者仍然准确，而后者会把 App 误报为前台。
+  static var otherAppInFront: Bool {
+    if let front = frontmostBundleID() { return front != Bundle.main.bundleIdentifier }
+    return UIApplication.shared.applicationState == .background
+  }
+
+  /// 不需要宠物画中画也能在后台继续工作。
+  ///
+  /// 真后台 tweak 保住进程时，宠物画中画不是必须的；此时允许手机操控
+  /// 跳过画中画的可用性要求，否则用户会永远卡在「请先选好宠物画中画」。
+  static var backgroundKeepAliveAvailable: Bool {
+    otherAppInFront && UIApplication.shared.isProtectedDataAvailable
+  }
+
 }
 
 // MARK: - 越狱通道（并入同一文件，随 Runner target 一起编译）
@@ -1292,52 +1338,6 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     guard let cls = NSClassFromString("LSApplicationWorkspace") else { return false }
     guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return false }
     return sendBool(workspace, NSSelectorFromString("openApplicationWithBundleID:"), bundleID as AnyObject)
-  }
-
-  // MARK: - 真后台判断
-
-  /// 当前真正显示在屏幕上的 App 的 bundle id；查不到时返回 nil。
-  ///
-  /// 越狱设备上装了「真后台」类 tweak 时，App 切走后
-  /// `UIApplication.applicationState` 可能仍然是 active，用它判断
-  /// 「我是不是前台」会得到错误答案。这里直接问 SpringBoard 谁在前台。
-  static func frontmostBundleID() -> String? {
-    if let handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-                           RTLD_NOW) {
-      defer { dlclose(handle) }
-      if let raw = dlsym(handle, "SBSCopyFrontmostApplicationDisplayIdentifier") {
-        typealias Fn = @convention(c) () -> Unmanaged<CFString>?
-        if let value = unsafeBitCast(raw, to: Fn.self)()?.takeRetainedValue() {
-          let bundle = value as String
-          if !bundle.isEmpty { return bundle }
-        }
-      }
-    }
-    // 退一步用 LSApplicationWorkspace，不需要 SpringBoard 权限。
-    guard let main = dlopen(nil, RTLD_NOW), let rawSend = dlsym(main, "objc_msgSend") else { return nil }
-    typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
-    let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
-    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return nil }
-    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return nil }
-    guard let app = send0(workspace, NSSelectorFromString("frontmostApplication")) else { return nil }
-    return send0(app, NSSelectorFromString("bundleIdentifier")) as? String
-  }
-
-  /// 别的 App 正占据屏幕——也就是 DSH Go 不在前台。
-  ///
-  /// 先看真实前台 App；查不到时退回系统状态判断。装了「真后台」tweak
-  /// 时前者仍然准确，而后者会把 App 误报为前台。
-  static var otherAppInFront: Bool {
-    if let front = frontmostBundleID() { return front != Bundle.main.bundleIdentifier }
-    return UIApplication.shared.applicationState == .background
-  }
-
-  /// 不需要宠物画中画也能在后台继续工作。
-  ///
-  /// 真后台 tweak 保住进程时，宠物画中画不是必须的；此时允许手机操控
-  /// 跳过画中画的可用性要求，否则用户会永远卡在「请先选好宠物画中画」。
-  static var backgroundKeepAliveAvailable: Bool {
-    otherAppInFront && UIApplication.shared.isProtectedDataAvailable
   }
 
   static func json(_ values: [String: Any]) -> String {
