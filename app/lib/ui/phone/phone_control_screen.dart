@@ -381,6 +381,8 @@ class _PhoneControlScreenState extends ConsumerState<PhoneControlScreen> {
     // The runner's `bridgeListening` is the XCTest route only; the on-device connection says
     // ready by its own switch and record.
     final linkSet = link != null && link.enabled && link.pairingPresent;
+    // 越狱通道：配对、开发者连接、DDI 镜像全都不需要，界面换成一句说明。
+    final jailbreak = link?.jailbreak ?? false;
     final taskRow = status.task.active
         ? ListPageRow(
             icon: AppIcons.phoneControl,
@@ -441,15 +443,26 @@ class _PhoneControlScreenState extends ConsumerState<PhoneControlScreen> {
             ListPageCard(children: [taskRow]),
             const SizedBox(height: 24),
           ],
-          const PhoneLinkSection(),
-          PageFootnote(l10n.iosPhoneLinkIntro),
+          // 越狱设备上配对凭据、开发者连接、开发者镜像这三样都用不到——
+          // 读屏和注入走越狱通道。留着它们只会让人对着装不上的镜像反复点「准备」，
+          // 所以整块换成一句说明。
+          if (jailbreak)
+            ListPageCard(children: [
+              ListPageRow(
+                icon: AppIcons.phoneControl,
+                title: '越狱通道已就绪',
+                subtitle: '这台手机的抓屏和点按走越狱通道，不需要导入配对凭据、'
+                    '打开开发者连接，也不需要下载开发者镜像。'
+                    '只要上面「手机操控」是开的，就可以直接让我操作。',
+                subtitleMaxLines: 5,
+              ),
+            ])
+          else ...[
+            const PhoneLinkSection(),
+            PageFootnote(l10n.iosPhoneLinkIntro),
+          ],
           const SizedBox(height: 24),
-          // 宠物画中画已从手机操控里移除：越狱机的真后台插件负责让 App 在后台
-          // 活着，读屏和点按都不再要求画中画，所以这一页不再有它的开关。
           ListPageCard(children: [returnRow]),
-          const SizedBox(height: 24),
-          // XCTest 增强已彻底移除：越狱通道自带抓屏和 HID 注入，不需要它，
-          // 也不再有任何「增强开关」可开。
         ],
       ],
     );
