@@ -739,7 +739,9 @@ class _WebViewPageState extends State<WebViewPage> {
                 }
                 _set(() {
                   _loading = false;
-                  _error = error.description;
+                  // 带上 WebKit 的错误码：-1022 是 ATS 拦了明文 HTTP，
+                  // -1004 是端口没监听，-1001 是超时，三种原因修法完全不同。
+                  _error = '${error.errorCode}: ${error.description}';
                 });
               }
             },
