@@ -375,8 +375,10 @@ final class IOSPhoneCoreActions {
                     current: @escaping () -> Bool) async throws -> IOSPhoneCoreReply {
     try require(current)
     let needsBackground = values["nativeFrameId"] != nil || values["op"] as? String == "screenshot"
+    // 别的 App 在屏幕上就够：宠物画中画只是保活手段之一，装了真后台 tweak
+    // 时不需要它。两者都不可用才拒绝。
     let permitted = { current() && (!needsBackground ||
-      (UIApplication.shared.applicationState == .background && IOSPetOverlay.shared.isKeepingAlive)) }
+      IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive) }
     guard permitted() else { throw IOSPhoneScreenError.cancelled }
     let reply: IOSPhoneCoreReply
     switch await core.request(values, ownerID: execution.ownerID, current: permitted) {
@@ -397,7 +399,7 @@ final class IOSPhoneCoreActions {
   }
   private func requireBackground(_ current: () -> Bool) throws {
     try require(current)
-    guard UIApplication.shared.applicationState == .background, IOSPetOverlay.shared.isKeepingAlive else {
+    guard IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive else {
       throw IOSPhoneOperationError(message: "目标界面或画中画已改变，停止继续派发。")
     }
   }
