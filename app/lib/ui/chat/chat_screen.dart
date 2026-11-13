@@ -95,7 +95,6 @@ import 'usage_sheet.dart';
 import 'voice/voice_controller.dart';
 import 'widgets/activity_strip.dart';
 import 'widgets/attachments.dart';
-import 'pasteboard_image.dart';
 import 'widgets/notice_row.dart';
 import 'widgets/permission_pill.dart';
 import 'widgets/plus_panel.dart';
@@ -162,11 +161,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _scheduleInteraction();
-      // 复制一张截图通常就是切出去再切回来：回来时重看一眼剪贴板。
-      unawaited(_refreshPasteboardImage());
-    }
+    if (state == AppLifecycleState.resumed) _scheduleInteraction();
   }
 
   final _input = MentionTextController();
@@ -200,9 +195,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
 
   /// Picked in the ＋ menu, not sent yet.
   List<DraftAttachment> _drafts = const [];
-
-  /// 剪贴板里有图片时，输入框旁边多出「粘贴」键。
-  bool _pasteboardHasImage = false;
 
   /// Only this creation may own the composer's busy state.
   Object? _creating;
@@ -259,7 +251,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    unawaited(_refreshPasteboardImage());
     _scheduleInteraction();
     ref.listenManual(currentSessionProvider, (_, _) => _scheduleInteraction());
     _voice = VoiceInputController(
@@ -888,33 +879,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
     }
   }
 
-  /// 把剪贴板里的截图塞进附件托盘，不直接发送。
-  ///
-  /// Flutter 的 Clipboard 只管文本，图片要读 UIPasteboard，所以走原生。
-  /// 读出来是 PNG；托盘里和从相册选的图一样，可以删掉再重选。
-  Future<void> _pasteImage() async {
-    final pasted = await PasteboardImage.read();
-    if (!mounted) return;
-    if (pasted == null) {
-      _toast(appL10n.chatReadImageFailed);
-      return;
-    }
-    _addDrafts([DraftAttachment.sniff('${appL10n.fileImageName}.png', pasted.data)]);
-    HapticFeedback.selectionClick();
-  }
-
-  /// 剪贴板里有没有图：决定「粘贴」键要不要出现。
-  ///
-  /// 切回前台时重新读一次——手机上复制一张截图通常就是切出去再切回来，
-  /// 不刷新这个键会一直不出现。
-  Future<void> _refreshPasteboardImage() async {
-    final has = await PasteboardImage.available();
-    if (!mounted || has == _pasteboardHasImage) return;
-    setState(() => _pasteboardHasImage = has);
-  }
-
   /// An image from the keyboard (screenshot, sticker): into the tray, not sent.
-  void _pasteContent(KeyboardInsertedContent content) {    final data = content.data;
+  void _pasteContent(KeyboardInsertedContent content) {
+    final data = content.data;
     if (data == null || data.isEmpty) {
       _toast(appL10n.chatReadImageFailed);
       return;
@@ -1962,17 +1929,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                     onContentInserted: connected ? _pasteContent : null,
                                     onStop: _stop,
                                     hasAttachments: _drafts.isNotEmpty,
-                                    leading: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        AttachButton(onPressed: connected ? _attach : null),
-                                        if (connected && _pasteboardHasImage)
-                                          Padding(
-                                            padding: const EdgeInsets.only(left: 2),
-                                            child: PasteImageButton(onPressed: _pasteImage),
-                                          ),
-                                      ],
-                                    ),
+                                    leading: AttachButton(onPressed: connected ? _attach : null),
                                     keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
                                     footer: _composerOpens(context) && !isChild
                                         ? ComposerModelPill(
