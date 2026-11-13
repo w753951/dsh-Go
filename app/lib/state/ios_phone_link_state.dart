@@ -49,14 +49,33 @@ class PhoneLinkController extends Notifier<PhoneLinkView> {
     return const PhoneLinkView();
   }
 
+  /// 已经自动连过一次就不再重复（每次冷启动最多一次）。
+  bool _autoConnected = false;
+
   Future<void> refresh() async {
     final api = _api;
     if (api == null) return;
     try {
-      _show(await api.status());
+      final status = await api.status();
+      _show(status);
+      await _autoConnect(api, status);
     } on Object {
       // No native side (an app built without it): the section stays away.
     }
+  }
+
+  /// 手机操控开着、但连接还没就绪时自动跑一次「检查连接」。
+  ///
+  /// 越狱通道的会话必须由这一步建立；不建立的话每个手机工具都会在会话层
+  /// 直接失败（ERR_PHONE_CORE_PROTOCOL），用户看到的却是「点击没反应」。
+  /// 以前要用户自己进设置点一下「检查」，忘了点就整条通道不可用。
+  Future<void> _autoConnect(PhoneLinkApi api, PhoneLinkStatus status) async {
+    if (_autoConnected || state.busy) return;
+    if (!status.enabled || !status.buildAvailable) return;
+    if (status.phase == PhoneLinkPhase.ready || status.phase == PhoneLinkPhase.starting) return;
+    if (status.phase == PhoneLinkPhase.faulted) return; // 上次没确认关闭：等重启
+    _autoConnected = true;
+    await run(PhoneLinkStep.check);
   }
 
   void _show(PhoneLinkStatus status) {
