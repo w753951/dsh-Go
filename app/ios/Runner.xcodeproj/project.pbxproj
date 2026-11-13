@@ -72,6 +72,7 @@
 		D5480000000000000000C027 /* LaunchChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C026 /* LaunchChannel.swift */; };
 		D5480000000000000000C029 /* NativeFilesChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C028 /* NativeFilesChannel.swift */; };
 		D5480000000000000000C02B /* NativeMediaChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C02A /* NativeMediaChannel.swift */; };
+		D5500000000000000000PA02 /* PasteboardImageChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5500000000000000000PA01 /* PasteboardImageChannel.swift */; };
 		D5480000000000000000C02D /* IslandsChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C02C /* IslandsChannel.swift */; };
 		D5480000000000000000C011 /* EngineChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C010 /* EngineChannel.swift */; };
 		D5480000000000000000C013 /* EngineRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5480000000000000000C012 /* EngineRuntime.swift */; };
@@ -203,6 +204,7 @@
 		D5480000000000000000C026 /* LaunchChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchChannel.swift; sourceTree = "<group>"; };
 		D5480000000000000000C028 /* NativeFilesChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFilesChannel.swift; sourceTree = "<group>"; };
 		D5480000000000000000C02A /* NativeMediaChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMediaChannel.swift; sourceTree = "<group>"; };
+		D5500000000000000000PA01 /* PasteboardImageChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteboardImageChannel.swift; sourceTree = "<group>"; };
 		D5480000000000000000C02C /* IslandsChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IslandsChannel.swift; sourceTree = "<group>"; };
 		D5480000000000000000C010 /* EngineChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineChannel.swift; sourceTree = "<group>"; };
 		D5480000000000000000C012 /* EngineRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRuntime.swift; sourceTree = "<group>"; };
@@ -381,6 +383,7 @@
 				D5480000000000000000C026 /* LaunchChannel.swift */,
 				D5480000000000000000C028 /* NativeFilesChannel.swift */,
 				D5480000000000000000C02A /* NativeMediaChannel.swift */,
+				D5500000000000000000PA01 /* PasteboardImageChannel.swift */,
 				D5480000000000000000C02C /* IslandsChannel.swift */,
 				D5480000000000000000C010 /* EngineChannel.swift */,
 				D5480000000000000000C012 /* EngineRuntime.swift */,
@@ -706,6 +709,7 @@
 				D5480000000000000000C027 /* LaunchChannel.swift in Sources */,
 				D5480000000000000000C029 /* NativeFilesChannel.swift in Sources */,
 				D5480000000000000000C02B /* NativeMediaChannel.swift in Sources */,
+				D5500000000000000000PA02 /* PasteboardImageChannel.swift in Sources */,
 				D5480000000000000000C02D /* IslandsChannel.swift in Sources */,
 				D5480000000000000000C011 /* EngineChannel.swift in Sources */,
 				D5480000000000000000C013 /* EngineRuntime.swift in Sources */,
