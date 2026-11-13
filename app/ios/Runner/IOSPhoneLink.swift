@@ -76,6 +76,9 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
       "schema": 1, "enabled": enabled, "buildAvailable": available,
       "defaultBackend": "coredevice", "xctestEnabled": xctestEnabled, "appRoutes": appRoutes,
       "pairing": pairingView(jailbreak: jailbreak), "legacyPairingNeedsMigration": legacyPresent,
+      // 越狱通道不需要配对凭据、开发者连接或 DDI 镜像；界面据这个字段
+      // 把那几行整块收起来，免得用户对着装不上的「开发者镜像」反复点准备。
+      "jailbreak": jailbreak,
       "connection": core.state, "connected": core.isReady, "lastCheck": lastCheck,
       "ddiCache": cache.status(), "operationPending": operationID != nil, "progress": progress,
       "clipboard": IOSPhoneClipboard.shared.status(),
