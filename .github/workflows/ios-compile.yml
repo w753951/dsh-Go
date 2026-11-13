@@ -116,14 +116,6 @@ jobs:
           [ -d "$src/vendor/magpie" ] && cp -R "$src/vendor/magpie" "$dest/vendor/" || true
           test -f "$dest/index.js" || { echo '::error title=plugin::the built-in plugin did not land'; exit 1; }
           echo "built-in plugin size: $(du -sh "$dest" | cut -f1)"
-      - name: Package the plain ipa
-        run: |
-          app="app/build/ios/iphoneos/Runner.app"
-          test -d "$app" || { echo '::error title=ipa::no Runner.app was produced'; exit 1; }
-          rm -rf "$RUNNER_TEMP/plain"; mkdir -p "$RUNNER_TEMP/plain/Payload"
-          cp -R "$app" "$RUNNER_TEMP/plain/Payload/"
-          (cd "$RUNNER_TEMP/plain" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-plain.ipa")
-
       - name: Sign with the HID entitlement
         run: |
           brew install ldid || true
@@ -131,23 +123,27 @@ jobs:
           app="app/build/ios/iphoneos/Runner.app"
           ent="app/ios/Runner/ent-hidonly.plist"
           test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
-          cp -R "$app" "$RUNNER_TEMP/appH"
-          "$LLDID" -S"$ent" "$RUNNER_TEMP/appH/Runner"
+          echo "Frameworks embedded:"; ls "$app/Frameworks"
+          echo "built-in plugin:"; du -sh "$app/builtin-plugins" 2>/dev/null || echo none
+          # 只签主二进制：TrollStore 从这里读 entitlements 再签整包。
+          # 绝不能对 App.framework/App 跑 ldid，Dart AOT 快照会校验失败。
+          "$LLDID" -S"$ent" "$app/Runner"
           echo "=== entitlements ==="
-          "$LLDID" -e "$RUNNER_TEMP/appH/Runner"
-          rm -rf "$RUNNER_TEMP/ipH"; mkdir -p "$RUNNER_TEMP/ipH/Payload"
-          cp -R "$RUNNER_TEMP/appH" "$RUNNER_TEMP/ipH/Payload/Runner.app"
-          (cd "$RUNNER_TEMP/ipH" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go-hidonly.ipa")
-          du -h "$RUNNER_TEMP"/DSH-Go-*.ipa
+          "$LLDID" -e "$app/Runner"
+          "$LLDID" -e "$app/Runner" | grep -q 'hid.client.event-dispatch' \
+            || { echo '::error title=entitlements::hid entitlement did not land'; exit 1; }
+          rm -rf "$RUNNER_TEMP/ip"; mkdir -p "$RUNNER_TEMP/ip/Payload"
+          cp -R "$app" "$RUNNER_TEMP/ip/Payload/"
+          (cd "$RUNNER_TEMP/ip" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go.ipa")
+          du -h "$RUNNER_TEMP/DSH-Go.ipa"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist" || true
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-ipa
-          path: |
-            ${{ runner.temp }}/DSH-Go-plain.ipa
-            ${{ runner.temp }}/DSH-Go-hidonly.ipa
+          path: ${{ runner.temp }}/DSH-Go.ipa
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
