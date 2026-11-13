@@ -72,7 +72,8 @@ cp -R "$GUEST_BUILT/DshGuest.framework" "$GUEST_BUILT/DshGuestBridge.framework" 
 cp "$ENGINE/runtime.zip" "$RESOURCES/dsh-runtime/runtime.zip"
 # The phone tools' backend is iOS's own, so it isn't in the archive runtime/ohos composes.
 mkdir -p "$RESOURCES/dsh-runtime/phone"
-for file in actions.mjs bridge.mjs plugin.mjs descriptions.mjs catalog.json; do
+# 漏一个文件，plugin.mjs 的 import 就整条失败，phone 工具会全部消失——列表要和它 import 的一致。
+for file in actions.mjs bridge.mjs plugin.mjs descriptions.mjs ssh-client.mjs catalog.json; do
   cp "$ROOT/runtime/ios/phone/$file" "$RESOURCES/dsh-runtime/phone/"
 done
 if [ -d "$ROOT/runtime/ios/browser" ]; then
