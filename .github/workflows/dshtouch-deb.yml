@@ -62,54 +62,117 @@ jobs:
       - name: Assemble the deb
         run: |
           set -euo pipefail
-          root="build"
-          rm -rf "$root"
-          mkdir -p "$root/DEBIAN"
-          # rootless: 安装到 /var/jb 下，Sileo 负责映射。
-          mkdir -p "$root/var/jb/usr/bin"
-          cp dshtouch "$root/var/jb/usr/bin/dshtouch"
-          chmod 755 "$root/var/jb/usr/bin/dshtouch"
+          python3 - <<'PY'
+          import io, os, tarfile, time, gzip
 
-          cat > "$root/DEBIAN/control" <<EOF
-          Package: ${PKG}
-          Name: dshtouch
-          Version: ${VERSION}
-          Architecture: iphoneos-arm64
-          Description: 命令行操控工具（点击、滑动、输入、开应用、抓屏）
-          Maintainer: DSH Go build
-          Author: DSH Go build
-          Section: Utilities
-          Depends: firmware (>= 15.0)
-          EOF
+          def add(tar, name, data, mode=0o644, uname='root', gname='wheel'):
+              info = tarfile.TarInfo(name)
+              info.size = len(data)
+              info.mode = mode
+              info.uname = uname
+              info.gname = gname
+              info.mtime = 1767225600  # 固定时间戳，产物可复现
+              tar.addfile(info, io.BytesIO(data))
 
-          # 装完把权限和所有者再钉一次，避免解包行为差异。
-          cat > "$root/DEBIAN/postinst" <<'EOF'
-          #!/bin/sh
-          set -e
-          TARGET=/var/jb/usr/bin/dshtouch
-          [ -f "$TARGET" ] || TARGET=/usr/bin/dshtouch
-          if [ -f "$TARGET" ]; then
-            chmod 755 "$TARGET" || true
-            chown root:wheel "$TARGET" || true
-          fi
-          exit 0
-          EOF
-          chmod 755 "$root/DEBIAN/postinst"
+          stem = 'dshtouch_1.0.0_iphoneos-arm64'
+          root = 'build'
+          os.makedirs(f'{root}/DEBIAN', exist_ok=True)
+          os.makedirs(f'{root}/var/jb/usr/bin', exist_ok=True)
 
-          cat > "$root/DEBIAN/prerm" <<'EOF'
-          #!/bin/sh
-          exit 0
-          EOF
-          chmod 755 "$root/DEBIAN/prerm"
+          # 二进制
+          with open('dshtouch', 'rb') as fh:
+              binary = fh.read()
+          with open(f'{root}/var/jb/usr/bin/dshtouch', 'wb') as fh:
+              fh.write(binary)
+          os.chmod(f'{root}/var/jb/usr/bin/dshtouch', 0o755)
 
-          # 固定时间戳和属主，产出可复现的包。
-          find "$root" -exec touch -h -d '2026-01-01T00:00:00Z' {} + || true
+          control = b"""Package: com.dshgo.dshtouch
+Name: dshtouch
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Command-line control: tap, swipe, type, open apps, screenshot
+Maintainer: DSH Go build
+Author: DSH Go build
+Section: Utilities
+Depends: firmware (>= 15.0)
+"""
+          postinst = b"""#!/bin/sh
+set -e
+for TARGET in /var/jb/usr/bin/dshtouch /usr/bin/dshtouch; do
+  [ -f "$TARGET" ] || continue
+  chmod 755 "$TARGET" || true
+  chown root:wheel "$TARGET" || true
+done
+exit 0
+"""
+          with open(f'{root}/DEBIAN/control', 'wb') as fh:
+              fh.write(control)
+          with open(f'{root}/DEBIAN/postinst', 'wb') as fh:
+              fh.write(postinst)
+          os.chmod(f'{root}/DEBIAN/postinst', 0o755)
 
-          dpkg-deb --build --root-owner-group "$root" "dshtouch_${VERSION}_iphoneos-arm64.deb"
+          # control.tar.gz
+          cbuf = io.BytesIO()
+          with tarfile.open(fileobj=cbuf, mode='w') as tar:
+              add(tar, './control', control)
+              add(tar, './postinst', postinst, mode=0o755)
+          control_tar = gzip.compress(cbuf.getvalue(), mtime=0)
+
+          # data.tar.gz
+          dbuf = io.BytesIO()
+          with tarfile.open(fileobj=dbuf, mode='w') as tar:
+              add(tar, './var/', b'')
+              add(tar, './var/jb/', b'')
+              add(tar, './var/jb/usr/', b'')
+              add(tar, './var/jb/usr/bin/', b'')
+              add(tar, './var/jb/usr/bin/dshtouch', binary, mode=0o755)
+          data_tar = gzip.compress(dbuf.getvalue(), mtime=0)
+
+          # ar 归档
+          def ar_entry(name, data):
+              header = b''
+              header += name.encode().ljust(16, b' ')
+              header += str(int(time.time())).encode().ljust(12, b' ')
+              header += b'0'.ljust(6, b' ')
+              header += b'0'.ljust(6, b' ')
+              header += b'100644'.ljust(8, b' ')
+              header += str(len(data)).encode().ljust(10, b' ')
+              header += b'`\n'
+              out = header + data
+              if len(data) % 2:
+                  out += b'\n'
+              return out
+
+          deb = b'!<arch>\n'
+          deb += ar_entry('debian-binary', b'2.0\n')
+          deb += ar_entry('control.tar.gz', control_tar)
+          deb += ar_entry('data.tar.gz', data_tar)
+          with open(f'{stem}.deb', 'wb') as fh:
+              fh.write(deb)
+          print(f'wrote {stem}.deb ({len(deb)} bytes)')
+          PY
           ls -lh *.deb
-          echo "=== contents ==="
-          dpkg-deb -c "dshtouch_${VERSION}_iphoneos-arm64.deb"
 
+      - name: Verify the deb
+        run: |
+          python3 - <<'PY'
+          import tarfile, io, gzip
+          data = open('dshtouch_1.0.0_iphoneos-arm64.deb', 'rb').read()
+          assert data.startswith(b'!<arch>\n'), 'not an ar archive'
+          # 粗解析 ar 条目，确认两个 tar 成员都在
+          pos = 8
+          names = []
+          while pos + 60 <= len(data):
+              header = data[pos:pos+60]
+              name = header[0:16].decode().strip()
+              size = int(header[48:58].decode().strip())
+              names.append((name, size))
+              pos += 60 + size + (size % 2)
+          print('members:', names)
+          blobs = {n: s for n, s in names}
+          assert 'control.tar.gz' in blobs and 'data.tar.gz' in blobs, 'missing members'
+          print('deb looks structurally valid')
+          PY
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
