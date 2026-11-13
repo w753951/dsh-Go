@@ -376,6 +376,7 @@ final class IOSPhoneCoreDevice: NSObject {
     starter = Task { [weak self, weak run] in
       guard let self, let run else { return }
       let jailbreak = IOSJailbreakDevice.available()
+      Self.trace("begin run=\(run.id) jailbreak=\(jailbreak) native=\(self.native != nil)")
       let servicePort = jailbreak ? 0 : await self.port()
       guard !Task.isCancelled, self.active === run, !run.stopping,
         run.pairingGeneration == self.pairing.generation, self.now() < run.deadline,
@@ -427,10 +428,31 @@ final class IOSPhoneCoreDevice: NSObject {
     }
   }
 
+  /// 手机通道的诊断日志（	mp/phone.log）。
+  ///
+  /// 引擎侧只保留两行日志，失败码又都很笼统（例如 ERR_PHONE_CORE_PROTOCOL
+  /// 覆盖了七八种原因），没有这个文件就只能靠读代码猜。只记状态迁移和
+  /// 失败判定点，不记屏幕内容。
+  static func trace(_ message: String) {
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    let line = stamp + " " + message + "\n"
+    let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("phone.log")
+    if let data = line.data(using: .utf8) {
+      if let handle = try? FileHandle(forWritingTo: url) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        try? handle.close()
+      } else {
+        try? data.write(to: url)
+      }
+    }
+  }
+
   private func receive(_ run: Run, handle: UInt64, runID: String, kind: Int32, text: String) {
     guard active === run, run.id == runID, handle != 0, !run.terminal,
       !run.faulted || run.fault == .stopTimeout else { return }
     if run.handle == 0 { run.handle = handle } // Native callbacks may precede start's return.
+    Self.trace("event kind=\(kind) handle=\(handle) text=\(String(text.prefix(240)))")
     guard run.handle == handle, text.utf8.count <= 8192,
       let event = try? JSONDecoder().decode(IOSPhoneCoreEvent.self, from: Data(text.utf8)) else {
       if run.faulted { return }
@@ -486,6 +508,7 @@ final class IOSPhoneCoreDevice: NSObject {
   }
 
   private func receiveResult(_ run: Run, handle: UInt64, id: UInt64, status: Int32, text: String, bytes: Data?) {
+    Self.trace("result status=\(status) bytes=\(bytes?.count ?? -1) text=\(String(text.prefix(240)))")
     guard active === run, run.handle == handle, let pending = run.pending,
       pending.id == id, pending.reply == nil else { return }
     guard !run.stopping, !run.terminal, !run.faulted,
@@ -499,6 +522,7 @@ final class IOSPhoneCoreDevice: NSObject {
       ["read", "dispatched", "notSent", "uncertain"].contains(metadata.outcome ?? ""),
       metadata.code == nil || Self.safeCode(metadata.code) != nil,
       status == 0 || bytes == nil else {
+      Self.trace("protocol-reject outcome=\(metadata.outcome ?? "nil") code=\(metadata.code ?? "nil") status=\(status) bytes=\(bytes?.count ?? -1)")
       pending.reply = .failure(.init(code: "ERR_PHONE_CORE_PROTOCOL", mayHaveActed: pending.mutating))
       run.pending = nil; stop(run); return
     }
