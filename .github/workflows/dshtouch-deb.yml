@@ -1,13 +1,12 @@
-# 把 dshtouch 打成 rootless deb，Sileo 装完直接可用，
-# 不需要手动放文件、改权限或处理 /var/jb 的写保护。
+# 把 dshtouch 打成 rootless deb，Sileo 装完直接可用。
+# 打包逻辑在 tooling/ios/cli/make-deb.py，不嵌在 YAML 里，避免缩进问题。
 name: dshtouch deb
 
 on:
   push:
     branches: ['ios/**']
     paths:
-      - 'tooling/ios/cli/dshtouch.m'
-      - 'tooling/ios/cli/deb/**'
+      - 'tooling/ios/cli/**'
       - '.github/workflows/dshtouch-deb.yml'
   workflow_dispatch:
 
@@ -22,9 +21,6 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 20
-    env:
-      PKG: com.dshgo.dshtouch
-      VERSION: 1.0.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,134 +41,24 @@ jobs:
         run: |
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
-          cat > dshtouch.entitlements <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>platform-application</key><true/>
-            <key>com.apple.private.security.no-sandbox</key><true/>
-            <key>com.apple.private.hid.client.event-dispatch</key><true/>
-          </dict>
-          </plist>
-          PLIST
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '  <key>platform-application</key><true/>' \
+            '  <key>com.apple.private.security.no-sandbox</key><true/>' \
+            '  <key>com.apple.private.hid.client.event-dispatch</key><true/>' \
+            '</dict>' \
+            '</plist>' > dshtouch.entitlements
           "$LLDID" -Sdshtouch.entitlements dshtouch
           "$LLDID" -e dshtouch
 
       - name: Assemble the deb
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import io, os, tarfile, time, gzip
-
-          def add(tar, name, data, mode=0o644, uname='root', gname='wheel'):
-              info = tarfile.TarInfo(name)
-              info.size = len(data)
-              info.mode = mode
-              info.uname = uname
-              info.gname = gname
-              info.mtime = 1767225600  # 固定时间戳，产物可复现
-              tar.addfile(info, io.BytesIO(data))
-
-          stem = 'dshtouch_1.0.0_iphoneos-arm64'
-          root = 'build'
-          os.makedirs(f'{root}/DEBIAN', exist_ok=True)
-          os.makedirs(f'{root}/var/jb/usr/bin', exist_ok=True)
-
-          # 二进制
-          with open('dshtouch', 'rb') as fh:
-              binary = fh.read()
-          with open(f'{root}/var/jb/usr/bin/dshtouch', 'wb') as fh:
-              fh.write(binary)
-          os.chmod(f'{root}/var/jb/usr/bin/dshtouch', 0o755)
-
-          control = b"""Package: com.dshgo.dshtouch
-Name: dshtouch
-Version: 1.0.0
-Architecture: iphoneos-arm64
-Description: Command-line control: tap, swipe, type, open apps, screenshot
-Maintainer: DSH Go build
-Author: DSH Go build
-Section: Utilities
-Depends: firmware (>= 15.0)
-"""
-          postinst = b"""#!/bin/sh
-set -e
-for TARGET in /var/jb/usr/bin/dshtouch /usr/bin/dshtouch; do
-  [ -f "$TARGET" ] || continue
-  chmod 755 "$TARGET" || true
-  chown root:wheel "$TARGET" || true
-done
-exit 0
-"""
-          with open(f'{root}/DEBIAN/control', 'wb') as fh:
-              fh.write(control)
-          with open(f'{root}/DEBIAN/postinst', 'wb') as fh:
-              fh.write(postinst)
-          os.chmod(f'{root}/DEBIAN/postinst', 0o755)
-
-          # control.tar.gz
-          cbuf = io.BytesIO()
-          with tarfile.open(fileobj=cbuf, mode='w') as tar:
-              add(tar, './control', control)
-              add(tar, './postinst', postinst, mode=0o755)
-          control_tar = gzip.compress(cbuf.getvalue(), mtime=0)
-
-          # data.tar.gz
-          dbuf = io.BytesIO()
-          with tarfile.open(fileobj=dbuf, mode='w') as tar:
-              add(tar, './var/', b'')
-              add(tar, './var/jb/', b'')
-              add(tar, './var/jb/usr/', b'')
-              add(tar, './var/jb/usr/bin/', b'')
-              add(tar, './var/jb/usr/bin/dshtouch', binary, mode=0o755)
-          data_tar = gzip.compress(dbuf.getvalue(), mtime=0)
-
-          # ar 归档
-          def ar_entry(name, data):
-              header = b''
-              header += name.encode().ljust(16, b' ')
-              header += str(int(time.time())).encode().ljust(12, b' ')
-              header += b'0'.ljust(6, b' ')
-              header += b'0'.ljust(6, b' ')
-              header += b'100644'.ljust(8, b' ')
-              header += str(len(data)).encode().ljust(10, b' ')
-              header += b'`\n'
-              out = header + data
-              if len(data) % 2:
-                  out += b'\n'
-              return out
-
-          deb = b'!<arch>\n'
-          deb += ar_entry('debian-binary', b'2.0\n')
-          deb += ar_entry('control.tar.gz', control_tar)
-          deb += ar_entry('data.tar.gz', data_tar)
-          with open(f'{stem}.deb', 'wb') as fh:
-              fh.write(deb)
-          print(f'wrote {stem}.deb ({len(deb)} bytes)')
-          PY
+          python3 tooling/ios/cli/make-deb.py dshtouch
           ls -lh *.deb
 
-      - name: Verify the deb
-        run: |
-          python3 - <<'PY'
-          import tarfile, io, gzip
-          data = open('dshtouch_1.0.0_iphoneos-arm64.deb', 'rb').read()
-          assert data.startswith(b'!<arch>\n'), 'not an ar archive'
-          # 粗解析 ar 条目，确认两个 tar 成员都在
-          pos = 8
-          names = []
-          while pos + 60 <= len(data):
-              header = data[pos:pos+60]
-              name = header[0:16].decode().strip()
-              size = int(header[48:58].decode().strip())
-              names.append((name, size))
-              pos += 60 + size + (size % 2)
-          print('members:', names)
-          blobs = {n: s for n, s in names}
-          assert 'control.tar.gz' in blobs and 'data.tar.gz' in blobs, 'missing members'
-          print('deb looks structurally valid')
-          PY
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
