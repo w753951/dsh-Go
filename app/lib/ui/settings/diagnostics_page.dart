@@ -1,6 +1,7 @@
 // Idea after PiPilot (https://github.com/CikeSeven/pi_pilot), MIT, Copyright (c) 2026 CikeSeven. See THIRD_PARTY_NOTICES.md.
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -23,6 +24,7 @@ import '../shell/page_frame.dart';
 import '../theme/app_icons.dart';
 import 'settings_widgets.dart';
 import 'direct_engine_settings.dart';
+import 'phone_ssh_settings.dart';
 import '../common/brief_notice.dart';
 
 /// Self-service diagnostics: what the app knows about the runtime and the
@@ -146,6 +148,8 @@ class DiagnosticsPage extends ConsumerWidget {
         // The note belongs to the export card; the next group starts 24 below
         // it, as groups do.
         const DiagnosticsBundleNote(),
+        // iOS：给 AI 一条能执行命令的 SSH 通道（越狱机的 sshd 默认就开着）。
+        if (Platform.isIOS) const PhoneSshSettings(),
         if (ref.watch(androidSystemFeaturesProvider)) ...[const SizedBox(height: 24), const DirectEngineSettings()],
       ],
     );
