@@ -147,7 +147,7 @@ final class IOSPhoneRunner {
       return .failure("手机连接和 XCTest 增强均未启用。请由用户在设置中选择；已保存配对不等于授权操控。")
     }
     guard IOSPetOverlay.shared.isUsable || IOSPhoneCoreDevice.backgroundKeepAliveAvailable else {
-      return .failure("手机操控需要先启用并选好宠物画中画；配置完成后由用户重新发起。")
+      return .failure("手机已锁定，没有读取或派发动作；请解锁后重新发起。")
     }
     let plan: IOSPhoneOperation
     do { plan = try IOSPhoneOperation(request) }
