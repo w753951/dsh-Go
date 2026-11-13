@@ -697,6 +697,9 @@ class _WebViewPageState extends State<WebViewPage> {
               if (widget.dshWeb && widget.onSession != null) {
                 unawaited(_injectStateBridge());
               }
+              // iOS 的 WebKit 渲染进程被系统回收后，重建的 WebView 会停在
+              // 空白页且不触发 onRenderProcessGone；这里主动确认一次有没有内容。
+              if (widget.dshWeb) unawaited(_verifyRendered(controller));
             },
             onWebResourceError: (error) {
               if (kDebugMode) {
@@ -729,6 +732,41 @@ class _WebViewPageState extends State<WebViewPage> {
     await _guard.attach(controller, dark: _dark, textZoom: _textZoom);
     if (!mounted || controller != _controller) return;
     await controller.loadRequest(widget.url).catchError((_) {});
+  }
+
+  /// 加载完成后再探一次 DOM：iOS 上 WebKit 的渲染进程被系统回收后，
+  /// 重建的 WebView 会安静地停在空白页，既不报错也不回调 renderer gone。
+  /// 真的空白就给出重试入口，别让用户盯着白屏猜。
+  Future<void> _verifyRendered(WebViewController controller) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      await Future<void>.delayed(Duration(milliseconds: 700 + attempt * 700));
+      if (!mounted || controller != _controller || _gone || _error != null) return;
+      Object? length;
+      try {
+        length = await controller.runJavaScriptReturningResult(
+          '(document.body && String(document.body.innerText || "").trim().length) || 0',
+        );
+      } catch (_) {
+        continue;
+      }
+      final int rendered;
+      if (length is num) {
+        rendered = length.toInt();
+      } else {
+        rendered = int.tryParse('$length'.replaceAll('"', '')) ?? -1;
+      }
+      if (rendered > 0) return;
+    }
+    if (!mounted || controller != _controller || _gone || _error != null) return;
+    _set(() => _error = _blankMessage());
+  }
+
+  /// 空白页的说明。两种语言各写一份，避免为一个字符串重跑 l10n 生成。
+  String _blankMessage() {
+    final zh = Localizations.localeOf(context).languageCode == 'zh';
+    return zh
+        ? '网页加载完成，但没有渲染出任何内容。点重试重新加载。'
+        : 'The page finished loading but rendered nothing. Tap retry to load it again.';
   }
 
   void _onRendererGone(bool crashed) {
