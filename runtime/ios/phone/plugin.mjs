@@ -24,7 +24,7 @@ export function systemAnswer(system, name, args, answer) {
 
 // ---- shell：直接在本进程里走 SSH 连手机自己的 sshd ----
 //
-// 不经过 Swift 那一侧，所以不需要画面、不需要画中画，也不会弹「允许」。
+// 不经过 Swift 那一侧，所以不需要画面，也不会弹「允许」。
 // 手机是越狱机，sshd 默认就是 root/alpine；用户在设置里改过才会不同。
 const SHELL_DEFAULT = Object.freeze({ host: '127.0.0.1', port: 22, username: 'root', password: 'alpine' });
 const SHELL_TIMEOUT_MAX = 120_000;
