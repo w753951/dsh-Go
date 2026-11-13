@@ -379,9 +379,12 @@ final class IOSPhoneCoreActions {
     // 插件负责让进程活下去，保活不再是抓屏的条件。
     let permitted = { current() && (!needsBackground || IOSPhoneCoreDevice.otherAppInFront) }
     guard permitted() else {
-      // 这里只剩一种原因：DSH Go 自己占着屏幕，拍不到别人。说清楚该怎么办，
-      // 而不是丢一个 ERR_PHONE_CANCELLED 让人猜。
-      throw IOSPhoneOperationError(message: "DSH Go 现在在前台，拍不到别的应用。先让我打开目标应用（例如「打开微信」），它到后台后再读屏。")
+      // 说清「现在屏幕上是谁」：真实前台 App 不是我们就放行，是我们就直说，
+      // 让模型知道下一步该做的是「先打开目标应用」，而不是去动任何开关。
+      let front = IOSPhoneCoreDevice.frontmostBundleID() ?? "(未知)"
+      throw IOSPhoneOperationError(message:
+        "现在屏幕上的是 \(front)，不是要读的目标应用，所以没有拍屏。"
+        + "请先用 open 打开目标应用（例如「打开微信」），等 DSH Go 退到后台后再读屏。")
     }
     let reply: IOSPhoneCoreReply
     switch await core.request(values, ownerID: execution.ownerID, current: permitted) {
