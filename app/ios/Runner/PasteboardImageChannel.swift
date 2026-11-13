@@ -41,17 +41,20 @@ final class PasteboardImageChannel {
   private func read(_ result: @escaping FlutterResult) {
     let pasteboard = UIPasteboard.general
     guard pasteboard.hasImages else {
-      result(["ok": false, "reason": "empty"])
+      let payload: [String: Any] = ["ok": false, "reason": "empty"]
+      result(payload)
       return
     }
     guard let image = pasteboard.image ?? firstImage(in: pasteboard) else {
-      result(["ok": false, "reason": "unreadable"])
+      let payload: [String: Any] = ["ok": false, "reason": "unreadable"]
+      result(payload)
       return
     }
     let width = image.size.width * image.scale
     let height = image.size.height * image.scale
     guard width >= 1, height >= 1 else {
-      result(["ok": false, "reason": "empty"])
+      let payload: [String: Any] = ["ok": false, "reason": "empty"]
+      result(payload)
       return
     }
     // 太长的边先等比缩到 4096，手机截图很少超过这个数。
@@ -70,21 +73,24 @@ final class PasteboardImageChannel {
       limited = image
     }
     guard let data = limited.pngData() else {
-      result(["ok": false, "reason": "encode"])
+      let payload: [String: Any] = ["ok": false, "reason": "encode"]
+      result(payload)
       return
     }
     // 24 MB：够一张 4096 边长的 PNG，再多就说明不是正常截图。
     guard data.count <= 24 * 1024 * 1024 else {
-      result(["ok": false, "reason": "too-large"])
+      let payload: [String: Any] = ["ok": false, "reason": "too-large"]
+      result(payload)
       return
     }
-    result([
+    let payload: [String: Any] = [
       "ok": true,
       "data": FlutterStandardTypedData(bytes: data),
       "mimeType": "image/png",
       "width": Int(limited.size.width * limited.scale),
       "height": Int(limited.size.height * limited.scale),
-    ])
+    ]
+    result(payload)
   }
 
   /// `pasteboard.image` 只认第一项；多选或从别处复制时自己找第一张能解码的。
