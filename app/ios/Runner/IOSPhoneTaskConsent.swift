@@ -57,6 +57,19 @@ final class IOSPhoneTaskConsent {
   private var grantID = UUID()
   private var expiryWatcher: Task<Void, Never>?
   private var generation = UUID()
+  /// 用户选择「允许并记住」后置为 true。之后不再逐次弹授权页。
+  /// 关闭「手机操控」总开关会撤销它，下次需要重新确认一次。
+  private var alwaysAllow: Bool {
+    get { UserDefaults.standard.bool(forKey: "dsh.ios.phone.consent.always") }
+    set { UserDefaults.standard.set(newValue, forKey: "dsh.ios.phone.consent.always") }
+  }
+  private static let alwaysAllowSeconds: TimeInterval = 365 * 24 * 3600
+
+  /// 关闭「手机操控」总开关时调用，让下次使用重新确认一次。
+  /// 不放在 retire() 里：切换对话也会 retire，那样会退化成每次都要授权。
+  static func clearAlwaysAllow() {
+    UserDefaults.standard.set(false, forKey: "dsh.ios.phone.consent.always")
+  }
   /// Called synchronously, once, after the exact current grant has been cleared.
   /// No request/presenter closure is retained for the thirty-minute lifetime.
   var onExpiration: ((String, String) -> Void)?
@@ -126,16 +139,31 @@ final class IOSPhoneTaskConsent {
     // isGranted can synchronously retire an expired grant and its connection.
     // Do not show a new grant sheet for the now-retired invocation.
     guard live() else { return false }
-    if !reusesGrant {
+    if alwaysAllow {
+      // 已经长期允许：沿用同一份授权，不再弹授权页。
+      if grantOwner != owner || grantedUntil == nil {
+        guard let now = self.now(), now.isFinite, now >= 0 else { return false }
+        grantOwner = owner; grantedAt = now
+        grantedUntil = now + Self.alwaysAllowSeconds
+        lastGrantSample = now
+        watchGrant()
+      }
+    } else if !reusesGrant {
       let granted = await actions.confirm(request, title: "允许 AI 操控这台手机？",
-        detail: "授权接下来 30 分钟的本次手机操控任务。它可读取屏幕、打开应用、触摸和输入；每个实际调用仍会在这里单独问你。\n\n密码、验证码和支付信息交给你处理。切到其他 App 时需保持宠物画中画；暂停、关闭连接或结束任务会撤销本次资格。",
-        allow: "允许 30 分钟", deny: "拒绝")
-      guard granted, live(), foreground, let now = self.now(), now.isFinite, now >= 0,
-        (now + 30 * 60).isFinite, now + 30 * 60 > now else { return false }
-      grantOwner = owner; grantedAt = now; grantedUntil = now + 30 * 60; lastGrantSample = now
+        detail: "允许后本机会记住这个选择，不再逐次询问——读取屏幕、打开应用、触摸和输入都不再单独确认。密码、验证码和支付信息始终交给你处理。\n\n要撤销，关闭「手机操控」总开关即可，下次使用会重新确认一次。",
+        allow: "允许并记住", deny: "拒绝")
+      guard granted, live(), foreground, let now = self.now(), now.isFinite, now >= 0 else { return false }
+      alwaysAllow = true
+      grantOwner = owner; grantedAt = now
+      grantedUntil = now + Self.alwaysAllowSeconds
+      lastGrantSample = now
       watchGrant()
     }
     guard live(), isGranted else { return false }
+    // 长期允许下不再逐次确认；失败由具体动作自己报告。
+    if alwaysAllow && grantOwner == owner {
+      return live() && foreground
+    }
     let suffix = needsTarget
       ? "\n\n允许后，请自行切回要操控的界面。DSH Go 会重新核对屏幕；界面变化或画中画停止时不继续。通知点击本身不批准。"
       : "\n\n仅执行本次调用；这不批准后续动作。"
@@ -168,9 +196,15 @@ final class IOSPhoneTaskConsent {
       notificationBody: "已检查本次输入目标的键盘线索。请回到 DSH Go 确认临时剪贴板；尚未修改剪贴板或输入文字。"),
       live(), foreground else { return false }
     let windowSeconds = Int(IOSPhoneClipboard.pasteLifetime)
-    let allowed = await actions.confirm(request, title: "准备本次非 ASCII 粘贴？",
-      detail: "刚才已复核目标画面并检查键盘和敏感输入线索；这些线索不是输入焦点或安全性的证明。\n\n现在会在前台保存原剪贴板，并临时写入本次已批准的全文。原内容只保存在本 App 内存，不发送给模型。\n\n允许后请在 \(windowSeconds) 秒内自行切回刚才的输入界面，期间不要复制其他内容。DSH Go 会再次核对画面；后台无法回读剪贴板，不能保证发现其他 App 的并发复制。\n\n粘贴后只返回固定状态，不回传新的读屏文字或图片，也不会自动派发回车／发送按键；请你核对目标应用的实际结果。\n\n粘贴后请回到 DSH Go 核对并恢复原剪贴板；App 终止会丢失保存的原内容。取消不会撤回已派发的焦点点击。",
-      allow: "准备剪贴板", deny: "取消输入")
+    let allowed: Bool
+    if alwaysAllow {
+      // 长期允许下不再单独确认剪贴板；暂存与恢复仍按原流程执行。
+      allowed = live() && foreground
+    } else {
+      allowed = await actions.confirm(request, title: "准备本次非 ASCII 粘贴？",
+        detail: "刚才已复核目标画面并检查键盘和敏感输入线索；这些线索不是输入焦点或安全性的证明。\n\n现在会在前台保存原剪贴板，并临时写入本次已批准的全文。原内容只保存在本 App 内存，不发送给模型。\n\n允许后请在 \(windowSeconds) 秒内自行切回刚才的输入界面，期间不要复制其他内容。DSH Go 会再次核对画面；后台无法回读剪贴板，不能保证发现其他 App 的并发复制。\n\n粘贴后只返回固定状态，不回传新的读屏文字或图片，也不会自动派发回车／发送按键；请你核对目标应用的实际结果。\n\n粘贴后请回到 DSH Go 核对并恢复原剪贴板；App 终止会丢失保存的原内容。取消不会撤回已派发的焦点点击。",
+        allow: "准备剪贴板", deny: "取消输入")
+    }
     admitted = allowed && live() && foreground
     return admitted
   }
