@@ -400,7 +400,7 @@ final class IOSPhoneCoreActions {
   private func requireBackground(_ current: () -> Bool) throws {
     try require(current)
     guard IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive else {
-      throw IOSPhoneOperationError(message: "目标界面或画中画已改变，停止继续派发。")
+      throw IOSPhoneOperationError(message: "目标界面已改变，停止继续派发。")
     }
   }
   private func swipe(_ direction: String, anchor: CGPoint?, frame: String) -> [String: Any] {
