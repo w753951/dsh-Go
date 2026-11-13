@@ -5,8 +5,8 @@
 // 再把它加进 profile 包的 `dsh.profile.bundles`。
 //
 // 边界：
-//   - 只在 profile 已经存在时动手（引擎至少启动过一次），不替引擎创建 profile；
-//   - 复制是幂等的，已存在且完整就跳过；
+//   - 只处理已经存在 node_modules 的 profile（引擎至少启动过一次）；
+//   - 复制是幂等的，目标已在就跳过；
 //   - 任何一步失败都只记录，不影响启动，也不写坏已有的 package.json。
 
 import 'dart:convert';
@@ -25,6 +25,7 @@ class BuiltinPlugins {
   /// app bundle 里存放内置插件的位置（由构建脚本复制进去）。
   static const String bundleFolder = 'builtin-plugins';
 
+  /// App 可执行文件所在目录，也就是 .app 包本身。
   static String? get _appDirectory {
     if (!Platform.isIOS && !Platform.isMacOS) return null;
     final executable = Platform.resolvedExecutable;
@@ -40,32 +41,62 @@ class BuiltinPlugins {
     }
   }
 
+  /// 把这次注入看到的东西写成一行结果，供设置页或日志排查。
+  /// 返回 null 表示一切正常进了 profile，否则是卡在哪一步。
+  static String? lastResult;
+  static List<String> lastProfiles = const [];
+
   static Future<void> _ensure() async {
     final app = _appDirectory;
-    if (app == null) return;
+    if (app == null) {
+      lastResult = '没有 app 目录';
+      return;
+    }
     final sourceRoot = Directory('$app/$bundleFolder');
-    if (!sourceRoot.existsSync()) return;
+    if (!sourceRoot.existsSync()) {
+      lastResult = '包里没有 $bundleFolder';
+      return;
+    }
+    lastResult = '包内有 $bundleFolder';
 
     final home = LocalPaths.home;
-    if (home.isEmpty) return;
+    if (home.isEmpty) {
+      lastResult = '还没有 home 路径';
+      return;
+    }
     final profiles = Directory('$home/.dsh/profiles');
-    if (!profiles.existsSync()) return;
+    if (!profiles.existsSync()) {
+      lastResult = '引擎还没建 profile：${profiles.path}';
+      return;
+    }
 
+    final names = <String>[];
+    final seeded = <String>[];
     for (final entity in profiles.listSync()) {
       if (entity is! Directory) continue;
-      // 只补正常 profile，安全模式用到的 profile 保持原样。
-      if (entity.path.endsWith('/safe')) continue;
       final nodeModules = Directory('${entity.path}/node_modules');
       if (!nodeModules.existsSync()) continue;
+      names.add(entity.path.split('/').last);
       for (final name in bundled) {
         final source = Directory('${sourceRoot.path}/$name');
         if (!source.existsSync()) continue;
         final target = Directory('${nodeModules.path}/$name');
         if (!target.existsSync()) {
+          debugPrint('builtin plugins: copying $name into ${entity.path}');
           await _copy(source, target);
         }
+        // 每次启动都确保 package.json 里有这一项：用户可能之前自己删掉了。
         await _register(entity.path, name);
+        if (!seeded.contains(name)) seeded.add(name);
       }
+    }
+    lastProfiles = names;
+    if (names.isEmpty) {
+      lastResult = 'profile 目录下没有带 node_modules 的条目';
+    } else if (seeded.isEmpty) {
+      lastResult = '已在 profile（${names.join(',')}），但包内没有插件目录';
+    } else {
+      lastResult = '已注入 ${seeded.join(',')} → ${names.join(',')}';
     }
   }
 
@@ -85,7 +116,10 @@ class BuiltinPlugins {
   /// 在 profile 的 package.json 里登记 bundle。解析失败就原样不动。
   static Future<void> _register(String profile, String name) async {
     final manifest = File('$profile/package.json');
-    if (!manifest.existsSync()) return;
+    if (!manifest.existsSync()) {
+      debugPrint('builtin plugins: no package.json in $profile');
+      return;
+    }
     final text = await manifest.readAsString();
     final Map<String, dynamic> root;
     try {
@@ -95,14 +129,19 @@ class BuiltinPlugins {
     } catch (_) {
       return;
     }
-    final dsh = root['dsh'];
-    if (dsh is! Map<String, dynamic>) return;
-    final profileSection = dsh['profile'];
-    if (profileSection is! Map<String, dynamic>) return;
-    final bundles = profileSection['bundles'];
-    if (bundles is! List) return;
+    // 有些 profile 的 package.json 还没写 dsh 段，补出来再登记。
+    final dsh = root['dsh'] is Map<String, dynamic>
+        ? root['dsh'] as Map<String, dynamic>
+        : (root['dsh'] = <String, dynamic>{}) as Map<String, dynamic>;
+    final profileSection = dsh['profile'] is Map<String, dynamic>
+        ? dsh['profile'] as Map<String, dynamic>
+        : (dsh['profile'] = <String, dynamic>{}) as Map<String, dynamic>;
+    final bundles = profileSection['bundles'] is List
+        ? profileSection['bundles'] as List
+        : (profileSection['bundles'] = <dynamic>[]) as List;
     if (bundles.contains(name)) return;
     bundles.add(name);
+    debugPrint('builtin plugins: registering $name in $profile');
     await manifest.writeAsString(const JsonEncoder.withIndent('  ').convert(root));
   }
 }
