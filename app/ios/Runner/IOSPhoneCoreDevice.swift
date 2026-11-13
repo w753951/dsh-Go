@@ -797,8 +797,13 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     lock.unlock()
     let w = Int(image.size.width * image.scale)
     let h = Int(image.size.height * image.scale)
+    // 上层解析读屏结果时必须有 interfaceOrientation，缺了会直接判失败。
+    let orientation = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first?.interfaceOrientation.rawValue ?? 1
     let meta: [String: Any] = ["outcome": "read", "kind": "screenshot",
                               "width": w, "height": h, "nativeFrameId": frameID,
+                              "interfaceOrientation": orientation,
                               "contentType": "image/png"]
     return Outcome(status: 0, metadata: Self.json(meta), bytes: png)
   }
@@ -818,6 +823,11 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   /// 这条私有接口不依赖文件系统权限，所以没有 no-sandbox 也能拿到列表，
   /// 上层才能把「微信」这种名字解析成 bundle id。
   private func installedApplications() -> [[String: String]] {
+    // LSApplicationWorkspace 在 MobileCoreServices 里，没加载时 NSClassFromString 会返回 nil。
+    for path in ["/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
+                 "/System/Library/Frameworks/CoreServices.framework/CoreServices"] {
+      dlopen(path, RTLD_NOW)
+    }
     guard let handle = dlopen(nil, RTLD_NOW), let rawSend = dlsym(handle, "objc_msgSend") else {
       return []
     }
