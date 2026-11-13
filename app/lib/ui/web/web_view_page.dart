@@ -628,6 +628,10 @@ class _WebViewPageState extends State<WebViewPage> {
   int _progress = 0;
   bool _loading = true;
   String? _error;
+
+  /// 本机引擎还没起来时的自动重试次数；页面真正加载完就归零。
+  int _autoRetries = 0;
+
   DateTime? _hiddenAt;
   Brightness? _bgFor;
   WebPageInsets? _insets;
@@ -657,6 +661,15 @@ class _WebViewPageState extends State<WebViewPage> {
     _open();
     _lifecycle = AppLifecycleListener(onHide: _onHide, onShow: _onShow);
   }
+
+  /// 引擎还没监听端口时 WebKit 报的就是这几个；这些重试有意义，
+  /// 而认证失败、证书问题之类重试多少次都一样。
+  static bool _retriable(int code) =>
+      code == -1001 || // 超时
+      code == -1004 || // 连不上主机（端口还没监听）
+      code == -1005 || // 连接中断
+      code == -1009 || // 没有网络
+      code == -1003;   // 找不到主机
 
   /// A new WebView for [WebViewPage.url].
   void _open() {
@@ -688,6 +701,8 @@ class _WebViewPageState extends State<WebViewPage> {
             },
             onProgress: (p) => _set(() => _progress = p),
             onPageFinished: (_) {
+              // 这次真的连上了：下面的自动重试计数可以归零。
+              _autoRetries = 0;
               _set(() => _loading = false);
               _appliedInsets = null;
               _applyInsets();
@@ -710,6 +725,18 @@ class _WebViewPageState extends State<WebViewPage> {
                 );
               }
               if (error.isForMainFrame ?? true) {
+                // 本机引擎首次启动要解压几十 MB 运行时，端口还没监听时 WebView
+                // 一头撞上去就是「连接被拒」。这里先自己退让着重试几次，
+                // 别让用户对着「页面没有打开」手点重试。
+                if (widget.dshWeb && _autoRetries < 8 && _retriable(error.errorCode)) {
+                  _autoRetries++;
+                  final wait = Duration(milliseconds: 350 * _autoRetries);
+                  Future<void>.delayed(wait, () {
+                    if (!mounted || _gone || controller != _controller) return;
+                    unawaited(controller.loadRequest(widget.url).catchError((_) {}));
+                  });
+                  return;
+                }
                 _set(() {
                   _loading = false;
                   _error = error.description;
