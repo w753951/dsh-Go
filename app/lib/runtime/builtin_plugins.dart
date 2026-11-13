@@ -53,6 +53,36 @@ class BuiltinPlugins {
     for (final step in steps) {
       debugPrint('builtin plugins: $step');
     }
+    _writeLog(steps);
+  }
+
+  /// 把这一次的结果写到 `$DSH_HOME/dsh-app/builtin-plugins.log`。
+  ///
+  /// 手机上没法看 debugPrint，注入失败时只有这个文件能说明原因。
+  static void _writeLog(List<String> steps) {
+    try {
+      final home = LocalPaths.home;
+      if (home.isEmpty) return;
+      final file = File('$home/.dsh/dsh-app/builtin-plugins.log');
+      file.parent.createSync(recursive: true);
+      final stamp = DateTime.now().toIso8601String();
+      file.writeAsStringSync(
+        '[$stamp] ${lastResult}\n${steps.map((s) => '  - $s').join('\n')}\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      // 日志本身失败不影响注入。
+    }
+  }
+
+  /// profile 目录由引擎创建；App 先启动时可能还没有，等一会儿再来。
+  static bool _profileReady(Directory profiles) {
+    if (!profiles.existsSync()) return false;
+    for (final entity in profiles.listSync()) {
+      if (entity is Directory) return true;
+    }
+    return false;
   }
 
   static Future<void> _ensure(List<String> steps) async {
@@ -85,9 +115,15 @@ class BuiltinPlugins {
     }
 
     final profiles = Directory('$home/.dsh/profiles');
-    steps.add('profiles=${profiles.path} exists=${profiles.existsSync()}');
-    if (!profiles.existsSync()) {
-      lastResult = '引擎还没建 profile';
+    // 引擎首次启动前 profile 还不存在；等它建好再注入，最多等 20 秒。
+    // 调用方不 await 这个函数，所以等待不拖慢启动。
+    for (var attempt = 0; attempt < 40 && !_profileReady(profiles); attempt++) {
+      if (attempt == 0) steps.add('等引擎建 profile: ${profiles.path}');
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    steps.add('profiles ready=${_profileReady(profiles)}');
+    if (!_profileReady(profiles)) {
+      lastResult = '引擎还没建 profile（等了 20 秒）';
       return;
     }
 
