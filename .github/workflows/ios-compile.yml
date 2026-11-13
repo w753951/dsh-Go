@@ -8,6 +8,12 @@ on:
   push:
     branches: ['feat/ios-**', 'ios/**']
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner image (macos-26 has Xcode 26; macos-15 is easier to get)'
+        required: false
+        default: macos-26
+        type: string
 
 permissions:
   contents: read
@@ -18,14 +24,28 @@ concurrency:
 
 jobs:
   ipa:
-    runs-on: macos-26
+    # macos-26 容量紧张时会长时间排队；用它时要保证 Xcode 26 存在，
+    # 换到别的镜像则由下面的 “Select Xcode” 步骤挑最新的一个。
+    runs-on: ${{ inputs.runner || 'macos-26' }}
     timeout-minutes: 150
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       DSH_IOS_ENGINE_WORK: ${{ github.workspace }}/../engine-work
       FLUTTER_VERSION: 3.47.7
       FLUTTER_SHA256: dd9da574c3168460550117eb0e8dd0313ae934fabf64a82a6d557fff5fd1422e
     steps:
+      - name: Select Xcode
+        run: |
+          echo "runner: ${{ inputs.runner || 'macos-26' }}"
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(no Xcode in /Applications)"
+          # 优先 Xcode 26；否则取版本号最大的一个。
+          pick="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$pick" ]; then
+            pick="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          fi
+          test -n "$pick" || { echo '::error title=xcode::no Xcode found'; exit 1; }
+          echo "using $pick"
+          echo "DEVELOPER_DIR=$pick/Contents/Developer" >> "$GITHUB_ENV"
+          "$pick/Contents/Developer/usr/bin/xcodebuild" -version
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
