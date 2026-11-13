@@ -143,7 +143,10 @@ final class IOSPhoneRunner {
     guard !link.isPreparing else {
       return .failure("连接设置正在处理另一项准备，请等待完成后重新发起；不是增强开关未开启。")
     }
-    guard link.enabled || link.xctestEnabled else {
+    // 越狱通道自带抓屏和 HID 注入，既不需要「手机连接」（CoreDevice 配对），
+    // 也不需要「XCTest 增强」。这两个开关在越狱设备上不再是门槛。
+    let jailbreak = IOSJailbreakDevice.available()
+    guard jailbreak || link.enabled || link.xctestEnabled else {
       return .failure("手机连接和 XCTest 增强均未启用。请由用户在设置中选择；已保存配对不等于授权操控。")
     }
     // 画中画已移除：越狱机的真后台插件保证进程活着，这里只确认设备解锁。
@@ -159,12 +162,15 @@ final class IOSPhoneRunner {
     }
     let explicitApp = (plan.parameters["app"] as? String).flatMap { PhoneRunnerAppCatalog.bundleID(for: $0) }
     let preference = explicitApp.flatMap { link.appRoutes[$0] }
-    let mustCore = preference == "coredevice"
-    let mustXCTest = preference == "xctest"
-    let chooseXCTest = mustXCTest || ((plan.requiresObservation || plan.method == .screen) && lastRoute == .xctest)
+    // 越狱通道固定走 core 那一层（它已经被换成了越狱实现），既不配对也不走
+    // XCTest，所以「某个应用固定用哪个后端」这类规则在越狱设备上不适用。
+    let mustCore = !jailbreak && preference == "coredevice"
+    let mustXCTest = !jailbreak && preference == "xctest"
+    let chooseXCTest = !jailbreak
+      && (mustXCTest || ((plan.requiresObservation || plan.method == .screen) && lastRoute == .xctest))
     guard !chooseXCTest || link.xctestEnabled else { return .failure("XCTest 增强已关闭，没有启动或调用运行器。") }
     guard !mustCore || link.enabled else { return .failure("这个应用固定使用 CoreDevice，但本机连接已关闭。") }
-    let returnTarget = plan.needsTarget && link.xctestEnabled ? targetApplication : nil
+    let returnTarget = plan.needsTarget && link.xctestEnabled && !jailbreak ? targetApplication : nil
     let returnDescription = returnTarget.map {
       "\n\n若本次使用 XCTest，允许后会先返回本次任务已打开或观察的应用：\($0)，再重新核对屏幕。若保持 CoreDevice 路线，请自行切回目标界面。不会重复原来的点按或输入。"
     } ?? ""
@@ -186,7 +192,7 @@ final class IOSPhoneRunner {
     }
     progress(.connecting)
 
-    if !chooseXCTest, link.enabled {
+    if !chooseXCTest, jailbreak || link.enabled {
       // A new backend cannot race an owner whose teardown is still unknown.
       selfRunner.stop(ownerID: ownerID)
       let stopDeadline = Date().addingTimeInterval(12)
@@ -202,7 +208,7 @@ final class IOSPhoneRunner {
         // the native probe reports no input, an already enabled enhancement
         // can prepare a NEW XCTest observation, with normal approval below.
         // Never carry a CoreDevice element ID into an XCTest input request.
-        let mayEnhance = link.xctestEnabled && !mustCore && !link.appRoutes.values.contains("coredevice")
+        let mayEnhance = !jailbreak && link.xctestEnabled && !mustCore && !link.appRoutes.values.contains("coredevice")
         if capabilities["touch"] == false, mayEnhance, plan.method == .screen { break }
         if capabilities["touch"] == false, link.xctestEnabled, plan.requiresObservation {
           return .failure(mayEnhance
@@ -221,7 +227,7 @@ final class IOSPhoneRunner {
         }
         // Preparing transport is the ONLY automatic fallback point. A screen
         // sharing start or any input is never retried on another backend.
-        guard !mustCore, !failure.mayHaveActed, core.maySwitchBackend,
+        guard !jailbreak, !mustCore, !failure.mayHaveActed, core.maySwitchBackend,
           link.xctestEnabled, !link.appRoutes.values.contains("coredevice"),
           !plan.requiresObservation else {
           return .failure(failure.code + "：本次未完成连接；不自动重复动作。需要镜像时请到连接设置明确准备。")
@@ -229,7 +235,7 @@ final class IOSPhoneRunner {
       }
     }
     guard live(), consent.isGranted else { return .failure(IOSPhoneSelfRunnerError.cancelled.message) }
-    guard link.xctestEnabled else { return .failure("XCTest 增强已关闭，没有启动或调用运行器。") }
+    guard !jailbreak, link.xctestEnabled else { return .failure("XCTest 增强已关闭，没有启动或调用运行器。") }
     // A fresh, unknown route is not guessed. The XCTest server also checks the
     // exact live bundle ID against these rules before every observed input.
     if explicitApp == nil, link.appRoutes.values.contains("coredevice"), lastRoute != .xctest {
