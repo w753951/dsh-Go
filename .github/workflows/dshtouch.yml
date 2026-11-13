@@ -1,0 +1,64 @@
+# 只编译 dshtouch，几分钟就能出结果，不依赖整个 ipa 构建。
+name: dshtouch
+
+on:
+  push:
+    branches: ['ios/**']
+    paths:
+      - 'tooling/ios/cli/dshtouch.m'
+      - '.github/workflows/dshtouch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dshtouch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compile
+        run: |
+          xcrun --sdk iphoneos clang -arch arm64 -fobjc-arc -O2 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -miphoneos-version-min=15.0 \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
+            -o "$RUNNER_TEMP/dshtouch" tooling/ios/cli/dshtouch.m
+          file "$RUNNER_TEMP/dshtouch"
+          xcrun lipo "$RUNNER_TEMP/dshtouch" -verify_arch arm64
+
+      - name: Sign for jailbreak
+        run: |
+          brew install ldid || true
+          LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+          cat > "$RUNNER_TEMP/dshtouch.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.hid.client.event-dispatch</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          "$LLDID" -S"$RUNNER_TEMP/dshtouch.plist" "$RUNNER_TEMP/dshtouch"
+          echo "=== entitlements ==="
+          "$LLDID" -e "$RUNNER_TEMP/dshtouch"
+          ls -lh "$RUNNER_TEMP/dshtouch"
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dshtouch
+          path: ${{ runner.temp }}/dshtouch
+          if-no-files-found: error
+          retention-days: 30
