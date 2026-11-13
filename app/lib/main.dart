@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -30,9 +32,9 @@ Future<void> _startApp() async {
     StartupTrace.step('launch screen', LaunchController.begin, onLate: LaunchController.giveUp),
     StartupTrace.step('paths', LocalPaths.load),
   ]);
-  // 把随包内置的插件补进本机引擎 profile。只在 profile 已存在时动手，
-  // 失败也不影响启动。
-  await StartupTrace.step('builtin plugins', BuiltinPlugins.ensure);
+  // 把随包内置的插件补进本机引擎 profile。引擎建 profile 可能要等几秒，
+  // 所以这里不等它：注入在后台重试，失败也只写日志，不影响启动。
+  unawaited(StartupTrace.step('builtin plugins', BuiltinPlugins.ensure));
   // MIT / OFL notices must ship with the APK, not just the sources.
   registerThirdPartyLicenses();
   registerFontLicenses();
