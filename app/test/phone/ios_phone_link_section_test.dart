@@ -58,6 +58,15 @@ class _Link implements PhoneLinkApi {
       _step('restoreClipboard:$overwriteChanged');
   @override
   Future<PhoneLinkResult> discardSavedClipboard() => _step('discardSavedClipboard');
+  @override
+  Future<bool> consentAlways() async => alwaysAllow;
+  @override
+  Future<PhoneLinkResult> setConsentAlways(bool enabled) {
+    alwaysAllow = enabled;
+    return _step('setConsentAlways:$enabled');
+  }
+
+  bool alwaysAllow = false;
 }
 
 PhoneLinkStatus _status({
