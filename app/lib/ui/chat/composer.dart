@@ -49,6 +49,7 @@ class Composer extends StatefulWidget {
     this.sessionReady = true,
     this.accessory,
     this.leading,
+    this.pasteKey,
     this.tray,
     this.hasAttachments = false,
     this.onSendOptions,
@@ -87,6 +88,10 @@ class Composer extends StatefulWidget {
 
   /// 输入框左边的 40dp 件(＋ 附件)。
   final Widget? leading;
+
+  /// 发送键左边的粘贴键(剪贴板里的截图)。和 [leading] 的「＋」并存：
+  /// 一个是选文件，一个是直接贴刚截的图。
+  final Widget? pasteKey;
 
   /// 输入框上方的一条(引文、待发送的附件):出现时展开,拿掉时收起。
   final Widget? tray;
@@ -491,6 +496,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
               },
             );
             final footer = widget.footer;
+            final pasteKey = widget.pasteKey;
             final row = footer == null
                 ? Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
@@ -498,6 +504,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
                       if (leadingKey != null) ...[leadingKey, const SizedBox(width: 8)],
                       Expanded(child: field),
                       const SizedBox(width: 8),
+                      if (pasteKey != null) ...[pasteKey, const SizedBox(width: _keyGap)],
                       if (accessory != null) ...[accessory, const SizedBox(width: 2)],
                       sendKey,
                     ],
@@ -521,6 +528,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (pasteKey != null) ...[pasteKey, const SizedBox(width: _keyGap)],
                           if (accessory != null) ...[accessory, const SizedBox(width: _keyGap)],
                           sendKey,
                         ],
