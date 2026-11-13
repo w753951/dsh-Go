@@ -21,6 +21,7 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
+#import <objc/message.h>
 
 static int gFailures = 0;
 
@@ -49,26 +50,40 @@ static HIDTable gHID;
 
 static BOOL loadHID(void) {
   void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-  void *main = dlopen(NULL, RTLD_NOW);
-  if (!iokit && !main) {
+  void *mainHandle = dlopen(NULL, RTLD_NOW);
+  if (!iokit && !mainHandle) {
     fail(@"无法加载 IOKit");
     return NO;
   }
-  void *handles[2] = {iokit, main};
-  void *(^lookup)(const char *) = ^void *(const char *name) {
-    for (int i = 0; i < 2; i++) {
-      if (!handles[i]) continue;
-      void *symbol = dlsym(handles[i], name);
-      if (symbol) return symbol;
-    }
-    return NULL;
-  };
+  void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
 
-  gHID.createDigitizer = lookup("IOHIDEventCreateDigitizerEvent");
-  gHID.createKeyboard = lookup("IOHIDEventCreateKeyboardEvent");
-  gHID.setFloat = lookup("IOHIDEventSetFloatValue");
-  gHID.systemCreate = lookup("IOHIDEventSystemClientCreate");
-  gHID.dispatch = lookup("IOHIDEventSystemClientDispatchEvent");
+  // 不用 block 捕获数组：直接在函数里顺序查找。
+  void *handles[3] = {iokit, uikit, mainHandle};
+#define DSHSYM(field, name)                                                    \
+  do {                                                                         \
+    field = NULL;                                                              \
+    for (int i = 0; i < 3 && !field; i++) {                                    \
+      if (handles[i]) field = dlsym(handles[i], name);                         \
+    }                                                                          \
+  } while (0)
+
+  void *digitizerSymbol = NULL;
+  void *keyboardSymbol = NULL;
+  void *setFloatSymbol = NULL;
+  void *systemSymbol = NULL;
+  void *dispatchSymbol = NULL;
+  DSHSYM(digitizerSymbol, "IOHIDEventCreateDigitizerEvent");
+  DSHSYM(keyboardSymbol, "IOHIDEventCreateKeyboardEvent");
+  DSHSYM(setFloatSymbol, "IOHIDEventSetFloatValue");
+  DSHSYM(systemSymbol, "IOHIDEventSystemClientCreate");
+  DSHSYM(dispatchSymbol, "IOHIDEventSystemClientDispatchEvent");
+#undef DSHSYM
+
+  gHID.createDigitizer = (__typeof__(gHID.createDigitizer))digitizerSymbol;
+  gHID.createKeyboard = (__typeof__(gHID.createKeyboard))keyboardSymbol;
+  gHID.setFloat = (__typeof__(gHID.setFloat))setFloatSymbol;
+  gHID.systemCreate = (__typeof__(gHID.systemCreate))systemSymbol;
+  gHID.dispatch = (__typeof__(gHID.dispatch))dispatchSymbol;
 
   if (!gHID.createDigitizer || !gHID.createKeyboard || !gHID.systemCreate || !gHID.dispatch) {
     fail(@"缺少 IOHIDEvent 接口（越狱环境不完整）");
@@ -115,8 +130,8 @@ typedef struct {
 } ScreenMetrics;
 
 static ScreenMetrics metrics(void) {
-  CGSize bounds = UIScreen.mainScreen.bounds;
-  ScreenMetrics m = {bounds.width, bounds.height, UIScreen.mainScreen.scale};
+  CGRect bounds = UIScreen.mainScreen.bounds;
+  ScreenMetrics m = {bounds.size.width, bounds.size.height, UIScreen.mainScreen.scale};
   return m;
 }
 
@@ -124,11 +139,11 @@ typedef CGImageRef (*GetScreenImageFn)(void);
 
 static CGImageRef captureScreen(void) {
   void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
-  void *main = dlopen(NULL, RTLD_NOW);
+  void *mainImage = dlopen(NULL, RTLD_NOW);
   // 越狱环境里 UIGetScreenImage 通常在；拿不到就明确失败。
   GetScreenImageFn fn = NULL;
   if (uikit) fn = (GetScreenImageFn)dlsym(uikit, "UIGetScreenImage");
-  if (!fn && main) fn = (GetScreenImageFn)dlsym(main, "UIGetScreenImage");
+  if (!fn && mainImage) fn = (GetScreenImageFn)dlsym(mainImage, "UIGetScreenImage");
   if (!fn) {
     fail(@"找不到 UIGetScreenImage");
     return NULL;
@@ -211,10 +226,8 @@ static id workspace(void) {
     fail(@"找不到 LSApplicationWorkspace");
     return nil;
   }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-  return [cls performSelector:NSSelectorFromString(@"defaultWorkspace")];
-#pragma clang diagnostic pop
+  id (*call)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+  return call((id)cls, NSSelectorFromString(@"defaultWorkspace"));
 }
 
 // MARK: - 命令
@@ -319,10 +332,11 @@ static int commandOpen(NSString *bundleID) {
   }
   id ws = workspace();
   if (!ws) return 1;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-  BOOL ok = [ws performSelector:NSSelectorFromString(@"openApplicationWithBundleID:") withObject:bundleID] != nil;
-#pragma clang diagnostic pop
+  // openApplicationWithBundleID: 返回 BOOL，performSelector 会把它当对象处理，
+  // 这里改用函数指针调用，避免把 YES 误判成 nil。
+  SEL selector = NSSelectorFromString(@"openApplicationWithBundleID:");
+  BOOL (*call)(id, SEL, NSString *) = (BOOL (*)(id, SEL, NSString *))objc_msgSend;
+  BOOL ok = call(ws, selector, bundleID);
   if (!ok) { fail(@"打不开 %@", bundleID); return 1; }
   printf("opened %s\n", bundleID.UTF8String);
   return 0;
@@ -331,20 +345,16 @@ static int commandOpen(NSString *bundleID) {
 static int commandApps(NSString *query) {
   id ws = workspace();
   if (!ws) return 1;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-  NSArray *all = [ws performSelector:NSSelectorFromString(@"allInstalledApplications")];
-#pragma clang diagnostic pop
+  id (*listCall)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+  NSArray *all = listCall(ws, NSSelectorFromString(@"allInstalledApplications"));
   if (![all isKindOfClass:[NSArray class]]) { fail(@"取不到应用列表"); return 1; }
+  id (*stringCall)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
   int shown = 0;
   for (id app in all) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    NSString *identifier = [app performSelector:NSSelectorFromString(@"bundleIdentifier")];
-    NSString *name = [app performSelector:NSSelectorFromString(@"localizedName")];
-#pragma clang diagnostic pop
-    if (!identifier.length) continue;
-    if (!name.length) name = identifier;
+    NSString *identifier = stringCall(app, NSSelectorFromString(@"bundleIdentifier"));
+    NSString *name = stringCall(app, NSSelectorFromString(@"localizedName"));
+    if (![identifier isKindOfClass:[NSString class]] || !identifier.length) continue;
+    if (![name isKindOfClass:[NSString class]] || !name.length) name = identifier;
     if (query.length &&
         [name rangeOfString:query options:NSCaseInsensitiveSearch].location == NSNotFound &&
         [identifier rangeOfString:query options:NSCaseInsensitiveSearch].location == NSNotFound) {
