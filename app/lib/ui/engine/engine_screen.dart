@@ -7,6 +7,7 @@ import '../../l10n/l10n.dart';
 import '../../runtime/runtime_bridge.dart';
 import '../../runtime/runtime_state.dart';
 import '../../runtime/local_footprint.dart';
+import '../../runtime/builtin_plugins.dart';
 import '../../state/android_features.dart';
 import '../../state/engine_control.dart';
 import '../../state/runtime_capabilities_state.dart';
@@ -182,6 +183,7 @@ class EngineScreen extends ConsumerWidget {
             ),
             // iOS runs what the virtual shell can't in Linux, installed here on demand.
             if (Theme.of(context).platform == TargetPlatform.iOS) const LinuxSection(),
+            if (Theme.of(context).platform == TargetPlatform.iOS) const BuiltinPluginSection(),
             SettingsSection(
               title: l10n.phoneEngineRuntime,
               children: [
@@ -557,6 +559,72 @@ class _RelocationNote extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 内置插件的写入状态。
+///
+/// 手机端装插件要在引擎里走 npm，联网和磁盘都容易失败；构建期把插件包放进
+/// app 包，这里显示它有没有真正进到引擎 profile，并提供一次手动重试。
+class BuiltinPluginSection extends ConsumerStatefulWidget {
+  const BuiltinPluginSection({super.key});
+
+  @override
+  ConsumerState<BuiltinPluginSection> createState() => _BuiltinPluginSectionState();
+}
+
+class _BuiltinPluginSectionState extends ConsumerState<BuiltinPluginSection> {
+  bool _running = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首次进入时自己跑一遍：启动注入可能在引擎 profile 建好之前就结束了。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _run());
+  }
+
+  Future<void> _run() async {
+    if (_running) return;
+    setState(() => _running = true);
+    await BuiltinPlugins.ensure();
+    if (mounted) setState(() => _running = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final steps = BuiltinPlugins.lastSteps;
+    return SettingsSection(
+      title: '内置插件',
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${BuiltinPlugins.bundled.join(', ')} · ${_running ? '处理中…' : BuiltinPlugins.lastResult}',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              if (steps.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    steps.join('\n'),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.5),
+                  ),
+                ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _running ? null : _run,
+                  child: const Text('重新写入'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
