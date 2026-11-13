@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:dsh_client/dsh_client.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -340,10 +341,12 @@ class ChatAlertsController extends Notifier<ChatAlert?> {
     });
     ref.listen(appForegroundProvider, (_, foreground) {
       // Leaving the app with a banner up: keep it as a notification.
+      // 本机（手机上的引擎）也一样要发：AI 在后台干完活时，人看不到横幅，
+      // 只有系统通知能告诉他「完成了」。原先本机被跳过，等于后台永远没提醒。
       final banner = _banner;
       if (!foreground && banner != null) {
         _banner = null;
-        if (!banner.kind.attention || !banner.host.isLocal) unawaited(_channel.show(postFor(banner)));
+        unawaited(_channel.show(postFor(banner)));
       }
       if (!foreground) {
         // An approval can already be visible in the chat when the person
@@ -683,6 +686,11 @@ class ChatAlertsController extends Notifier<ChatAlert?> {
       viewed: ref.read(viewedChatProvider),
       petOnScreen: ref.read(petOnScreenProvider),
     );
+    // 真后台 tweak 会让本 App 一直报 active，于是「人其实在别的 App 里」
+    // 被判成「人还在本 App」，投递走了横幅，人就永远看不到完成提醒。
+    // 投递前问一次真实前台；翻成后台后，下面那个 foreground 监听会把
+    // 已经挂起的横幅转成系统通知。
+    if (foreground) unawaited(_recheckForeground());
     // The pet hears every alert (it moves for the one on screen too); it
     // speaks up for those that would have reached the person.
     petHearAlert(ref, alert, bubble: delivery == AlertDelivery.pet || delivery == AlertDelivery.system);
@@ -693,6 +701,22 @@ class ChatAlertsController extends Notifier<ChatAlert?> {
         _banner = alert;
       case AlertDelivery.system:
         unawaited(_channel.show(postFor(alert)));
+    }
+  }
+
+  /// Asks the native side who is really frontmost and corrects [appForegroundProvider].
+  ///
+  /// Only called when an alert is about to be delivered while the lifecycle still
+  /// claims we are on screen, so it costs one channel round-trip per alert at most.
+  Future<void> _recheckForeground() async {
+    try {
+      final front = await const MethodChannel('dsh/app').invokeMethod<Object?>('frontmostBundleID');
+      if (front is! String || front.isEmpty) return;
+      if (front == 'io.github.ccch1mneyyy.dshgo') return;
+      if (!ref.read(appForegroundProvider)) return;
+      ref.read(appForegroundProvider.notifier).set(false);
+    } catch (_) {
+      // No native side (tests, other platforms): leave the lifecycle answer alone.
     }
   }
 
