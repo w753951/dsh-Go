@@ -1968,10 +1968,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                     leading: SizedBox(
                                       width: 36,
                                       height: 36,
-                                      child: _pasteboardHasImage && connected
-                                          ? PasteImageButton(onPressed: _pasteImage)
-                                          : AttachButton(onPressed: connected ? _attach : null),
+                                      child: AttachButton(onPressed: connected ? _attach : null),
                                     ),
+                                    // 粘贴键常显在发送键左边：剪贴板里有截图时一键入托盘。
+                                    // 没有图就点，会提示读图失败，而不是让按钮忽隐忽现。
+                                    pasteKey: connected ? PasteImageButton(onPressed: _pasteImage) : null,
                                     keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
                                     footer: _composerOpens(context) && !isChild
                                         ? ComposerModelPill(
