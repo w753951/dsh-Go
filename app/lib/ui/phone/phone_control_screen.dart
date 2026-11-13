@@ -11,6 +11,7 @@ import '../../runtime/runtime_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/android_features.dart';
 import '../../state/hosts_state.dart';
+import '../../phone/ios_phone_link.dart';
 import '../../state/ios_phone_link_state.dart';
 import '../../state/phone_overlay_prefs.dart';
 import '../../state/phone_state.dart';
@@ -463,6 +464,10 @@ class _PhoneControlScreenState extends ConsumerState<PhoneControlScreen> {
           ],
           const SizedBox(height: 24),
           ListPageCard(children: [returnRow]),
+          const SizedBox(height: 24),
+          // 「不再逐次确认」：真后台插件让 App 在后台接管任务时，授权弹窗根本
+          // 看不到，任务就卡在那里。这里给一个显式开关，打开后不再弹授权页。
+          if (link != null) _AlwaysAllowRow(api: ref.read(phoneLinkApiProvider)),
         ],
       ],
     );
@@ -806,6 +811,79 @@ class _YoursGroup extends ConsumerWidget {
           onTap: () => onLink(_ConfirmLink.unlocks),
         ),
       ],
+    );
+  }
+}
+
+
+/// 「不再逐次确认」开关：直接读写原生那个 alwaysAllow 键。
+///
+/// 真后台接管任务时 App 在后台，授权页根本看不到，任务就卡住。打开这一项后
+/// 手机动作不再弹授权页（和首次授权时点「允许并记住」是同一个开关）。
+class _AlwaysAllowRow extends StatefulWidget {
+  const _AlwaysAllowRow({required this.api});
+
+  final PhoneLinkApi? api;
+
+  @override
+  State<_AlwaysAllowRow> createState() => _AlwaysAllowRowState();
+}
+
+class _AlwaysAllowRowState extends State<_AlwaysAllowRow> {
+  bool _on = false;
+  bool _loaded = false;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    final api = widget.api;
+    if (api == null) {
+      if (mounted) setState(() => _loaded = true);
+      return;
+    }
+    try {
+      final on = await api.consentAlways();
+      if (mounted) setState(() { _on = on; _loaded = true; });
+    } catch (_) {
+      if (mounted) setState(() => _loaded = true);
+    }
+  }
+
+  Future<void> _toggle(bool value) async {
+    final api = widget.api;
+    if (api == null || _busy) return;
+    setState(() { _busy = true; _on = value; });
+    try {
+      final result = await api.setConsentAlways(value);
+      if (mounted) setState(() => _on = value && result.ok);
+    } catch (_) {
+      if (mounted) setState(() => _on = !value);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = _loaded && !_busy;
+    return MergeSemantics(
+      child: ListPageRow(
+        icon: AppIcons.unlocks,
+        title: '不再逐次确认',
+        subtitle: '打开后手机动作不再弹授权页。真后台接管任务时看不到弹窗，'
+            '需要这一项；关掉「手机操控」总开关会一并撤销它。',
+        subtitleMaxLines: 4,
+        onTap: enabled ? () => unawaited(_toggle(!_on)) : null,
+        trailing: Switch.adaptive(
+          value: _on,
+          onChanged: enabled ? (value) => unawaited(_toggle(value)) : null,
+        ),
+      ),
     );
   }
 }
