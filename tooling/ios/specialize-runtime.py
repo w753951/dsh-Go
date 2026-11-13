@@ -26,25 +26,94 @@ PRELOAD = 'runtime/ohos/preload.mjs'
 RELOCATION_FILES = ('runtime/ios/storage/relocate.mjs', 'runtime/ios/storage/preload.mjs')
 PRELOAD_BEFORE = "await import('./publication/preload.mjs');\n"
 PRELOAD_AFTER = PRELOAD_BEFORE + "await import('../ios/storage/preload.mjs');\n"
-# iOS 15.0 的 Safari 是 WebKit 611.1，没有 Object.hasOwn（ES2022，Safari 15.4 才有）也没有
-# Array.prototype.at。Harness 网页版在挂载 React 之前就调 Object.hasOwn，抛异常后页面停在
-# 空白的 index.html 上。WebView 没有 atDocumentStart 注入口，所以在入口 HTML 的 <head> 最前面
-# 内联一段兼容代码：它比 defer 的入口 bundle 先执行，页面就能正常渲染。
+# iOS 15.0 的 Safari 是 WebKit 611.1。Harness 网页版和各插件的 client.js 用了一批它没有的
+# 接口，而且很多是在挂载 React 之前/首屏渲染时调用，一抛异常页面就停在空白上：
+#   Object.hasOwn            ES2022，Safari 15.4
+#   Array/String.prototype.at ES2022，Safari 15.4
+#   Array.prototype.findLast/findLastIndex ES2023，Safari 15.4（会话与对话面板首屏就用）
+#   Array.prototype.toSorted/toReversed/toSpliced/with  ES2023，Safari 16.0+
+#   Object.groupBy/Map.groupBy ES2024，Safari 17.4
+#   structuredClone           Safari 15.4（设置页插件直接调用）
+# WebView 没有 atDocumentStart 注入口，所以在入口 HTML 的 <head> 最前面内联一段兼容代码：
+# 它比 defer 的入口 bundle 和后来按需加载的插件先执行，页面就能正常渲染。
 WEB_FRONTEND_INDEX = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html'
 WEB_COMPAT_MARKER = b'dsh-ios15-compat'
 WEB_COMPAT_SCRIPT = (
     b'<script>/*dsh-ios15-compat*/(function(){'
+    # Object.hasOwn
     b'if(typeof Object.hasOwn!=="function"){'
     b'Object.defineProperty(Object,"hasOwn",{value:function(t,k){'
     b'return Object.prototype.hasOwnProperty.call(Object(t),k)},writable:true,configurable:true});}'
+    # Array.prototype.at
     b'if(typeof Array.prototype.at!=="function"){'
     b'Object.defineProperty(Array.prototype,"at",{value:function(n){'
     b'var o=Object(this),len=o.length>>>0;n=Math.trunc(n)||0;if(n<0)n+=len;'
     b'return (n<0||n>=len)?undefined:o[n]},writable:true,configurable:true});}'
+    # String.prototype.at
     b'if(typeof String.prototype.at!=="function"){'
     b'Object.defineProperty(String.prototype,"at",{value:function(n){'
     b'var s=String(this),len=s.length;n=Math.trunc(n)||0;if(n<0)n+=len;'
     b'return (n<0||n>=len)?undefined:s.charAt(n)},writable:true,configurable:true});}'
+    # Array.prototype.findLast / findLastIndex
+    b'if(typeof Array.prototype.findLast!=="function"){'
+    b'Object.defineProperty(Array.prototype,"findLast",{value:function(f,t){'
+    b'var o=Object(this),len=o.length>>>0;for(var i=len-1;i>=0;i--){if(f.call(t,o[i],i,o))return o[i]}'
+    b'return undefined},writable:true,configurable:true});}'
+    b'if(typeof Array.prototype.findLastIndex!=="function"){'
+    b'Object.defineProperty(Array.prototype,"findLastIndex",{value:function(f,t){'
+    b'var o=Object(this),len=o.length>>>0;for(var i=len-1;i>=0;i--){if(f.call(t,o[i],i,o))return i}'
+    b'return -1},writable:true,configurable:true});}'
+    # Array.prototype.toSorted / toReversed / toSpliced / with
+    b'if(typeof Array.prototype.toSorted!=="function"){'
+    b'Object.defineProperty(Array.prototype,"toSorted",{value:function(c){'
+    b'var a=Array.prototype.slice.call(Object(this));return a.sort(c)},writable:true,configurable:true});}'
+    b'if(typeof Array.prototype.toReversed!=="function"){'
+    b'Object.defineProperty(Array.prototype,"toReversed",{value:function(){'
+    b'return Array.prototype.slice.call(Object(this)).reverse()},writable:true,configurable:true});}'
+    b'if(typeof Array.prototype.toSpliced!=="function"){'
+    b'Object.defineProperty(Array.prototype,"toSpliced",{value:function(){'
+    b'var a=Array.prototype.slice.call(Object(this));'
+    b'Array.prototype.splice.apply(a,arguments);return a},writable:true,configurable:true});}'
+    b'if(typeof Array.prototype.with!=="function"){'
+    b'Object.defineProperty(Array.prototype,"with",{value:function(i,v){'
+    b'var a=Array.prototype.slice.call(Object(this)),len=a.length;i=Math.trunc(i)||0;if(i<0)i+=len;'
+    b'if(i<0||i>=len)throw new RangeError("Invalid index");a[i]=v;return a},'
+    b'writable:true,configurable:true});}'
+    # Object.groupBy / Map.groupBy
+    b'if(typeof Object.groupBy!=="function"){'
+    b'Object.defineProperty(Object,"groupBy",{value:function(it,f){'
+    b'var r=Object.create(null),n=0;for(var x of it){var k=f(x,n++);'
+    b'if(!Object.prototype.hasOwnProperty.call(r,k)){Object.defineProperty(r,k,'
+    b'{value:[],writable:true,enumerable:true,configurable:true})}r[k].push(x)}return r},'
+    b'writable:true,configurable:true});}'
+    b'if(typeof Map.groupBy!=="function"&&typeof Map==="function"){'
+    b'Object.defineProperty(Map,"groupBy",{value:function(it,f){'
+    b'var r=new Map(),n=0;for(var x of it){var k=f(x,n++);'
+    b'if(!r.has(k))r.set(k,[]);r.get(k).push(x)}return r},'
+    b'writable:true,configurable:true});}'
+    # structuredClone：够用的浅实现，保留常见可克隆类型
+    b'if(typeof structuredClone!=="function"){'
+    b'window.structuredClone=function(v){'
+    b'var seen=new WeakMap();'
+    b'function cp(x){'
+    b'if(x===null||typeof x!=="object")return x;'
+    b'if(seen.has(x))return seen.get(x);'
+    b'if(x instanceof Date)return new Date(x.getTime());'
+    b'if(x instanceof RegExp)return new RegExp(x.source,x.flags);'
+    b'if(x instanceof ArrayBuffer)return x.slice(0);'
+    b'if(ArrayBuffer.isView(x)){return new x.constructor(x.buffer.slice(0),x.byteOffset,x.length)}'
+    b'var out;'
+    b'if(Array.isArray(x)){out=[]}'
+    b'else if(x instanceof Map){out=new Map()}'
+    b'else if(x instanceof Set){out=new Set()}'
+    b'else{out={}}'
+    b'seen.set(x,out);'
+    b'if(x instanceof Map){x.forEach(function(val,key){out.set(cp(key),cp(val))});return out}'
+    b'if(x instanceof Set){x.forEach(function(val){out.add(cp(val))});return out}'
+    b'if(Array.isArray(x)){for(var i=0;i<x.length;i++)out[i]=cp(x[i]);return out}'
+    b'for(var k in x){if(Object.prototype.hasOwnProperty.call(x,k))out[k]=cp(x[k])}'
+    b'return out}'
+    b'return cp(v)};}'
     b'})();</script>'
 )
 
