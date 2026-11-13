@@ -220,23 +220,27 @@ final class IOSPhoneTaskConsent {
     var previousGate = ""
     #endif
     while true {
+      // 「别的 App 在屏幕上」既可能是正常后台，也可能是真后台 tweak 把所有
+      // App 都留在 active 的情况；只要真正的前台不是自己就算就位。
       let background = UIApplication.shared.applicationState == .background
+      let otherAppInFront = IOSPhoneCoreDevice.otherAppInFront
       let unlocked = UIApplication.shared.isProtectedDataAvailable
       let eligible = !Task.isCancelled && current() && generation == operation && isGranted
         && request.expiresAt > Date().timeIntervalSince1970 * 1000
-      let keepingAlive = background && IOSPetOverlay.shared.isKeepingAlive
+      let keepingAlive = (background || otherAppInFront) && unlocked
+      let inBackground = background || otherAppInFront
       #if DSH_PHONE_SELF_RUNNER_DIAGNOSTICS
-      let gate = "target wait bg=\(background) unlocked=\(unlocked) eligible=\(eligible) pip=\(keepingAlive) usable=\(IOSPetOverlay.shared.isUsable)"
+      let gate = "target wait bg=\(background) other=\(otherAppInFront) unlocked=\(unlocked) eligible=\(eligible) pip=\(keepingAlive) usable=\(IOSPetOverlay.shared.isUsable)"
       if gate != previousGate { previousGate = gate; IOSPhoneSelfRunner.diagnostic(gate) }
       #endif
-      let decision = wait.sample(now: now(), background: background,
+      let decision = wait.sample(now: now(), background: inBackground,
         protectedDataAvailable: unlocked, eligible: eligible, keepingAlive: keepingAlive)
       switch decision {
       case .refused:
         if !unlocked { targetWaitFailureMessage = "手机已锁定，没有派发动作；请解锁后重新发起。" }
         else if !eligible { targetWaitFailureMessage = "本次请求已取消、过期或暂停，没有派发动作；这不表示增强开关关闭。" }
-        else if !background { targetWaitFailureMessage = "DSH Go 仍在前台，未取得目标画面，没有派发动作。" }
-        else if !keepingAlive { targetWaitFailureMessage = "宠物画中画未保持播放，未派发动作；请恢复画中画后重新发起。" }
+        else if !inBackground { targetWaitFailureMessage = "DSH Go 仍在前台，未取得目标画面，没有派发动作。" }
+        else if !keepingAlive { targetWaitFailureMessage = "目标界面已改变，未派发动作；请重新发起。" }
         #if DSH_PHONE_SELF_RUNNER_DIAGNOSTICS
         IOSPhoneSelfRunner.diagnostic("target wait refused bg=\(background) eligible=\(eligible) pip=\(keepingAlive)")
         #endif
