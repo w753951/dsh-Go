@@ -448,7 +448,8 @@ class _PhoneControlScreenState extends ConsumerState<PhoneControlScreen> {
           // 活着，读屏和点按都不再要求画中画，所以这一页不再有它的开关。
           ListPageCard(children: [returnRow]),
           const SizedBox(height: 24),
-          const PhoneLinkExtrasSection(),
+          // XCTest 增强已彻底移除：越狱通道自带抓屏和 HID 注入，不需要它，
+          // 也不再有任何「增强开关」可开。
         ],
       ],
     );
