@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
@@ -114,6 +115,11 @@ WEB_COMPAT_SCRIPT = (
     b'for(var k in x){if(Object.prototype.hasOwnProperty.call(x,k))out[k]=cp(x[k])}'
     b'return out}'
     b'return cp(v)};}'
+    # Promise.withResolvers（Safari 17.4；会话/审批/工作区等首屏插件在用）
+    b'if(typeof Promise.withResolvers!=="function"){'
+    b'Promise.withResolvers=function(){var res,rej;'
+    b'var p=new Promise(function(a,b){res=a;rej=b});'
+    b'return {promise:p,resolve:res,reject:rej}};}'
     b'})();</script>'
 )
 
@@ -182,6 +188,188 @@ def web_bundle_compat(source: bytes, shim: bool = False) -> bytes:
     if shim and WEB_BUNDLE_MARKER not in text:
         text = WEB_BUNDLE_SHIM + text
     return source if text == original else text.encode('utf-8')
+
+
+# 正则后行断言 (?<= / (?<! 是 ES2018 的一部分，但 Safari 到 16.4 才实现。iOS 15.0 的
+# WebKit 读到含后行断言的【正则字面量】会在解析阶段直接 SyntaxError，整个脚本一行都
+# 不执行——vendor 主包里有这么一处（GFM 邮箱自动链接），它一挂首屏就永远白屏。
+# 这里把它换成运行时构造：新版 WebKit 用原来的正则，老版回退到永不匹配的 /(?!)/，
+# 于是 iOS 15 上只是少了邮箱自动加下划线这种修饰，界面照常起来。
+LOOKBEHIND_LITERAL = re.compile(rb'(?<![)\]}\w$/])/\(\?<[=!]')
+REGEX_FLAGS = re.compile(rb'[a-z]*')
+
+
+def _regex_literal_at(data: bytes, slash: int) -> tuple[bytes, bytes, int] | None:
+    """Return (body, flags, end) for the regex literal whose opening slash is at [slash]."""
+    i = slash + 1
+    in_class = False
+    while i < len(data):
+        ch = data[i:i + 1]
+        if ch == b'\\':
+            i += 2
+            continue
+        if in_class:
+            if ch == b']':
+                in_class = False
+        elif ch == b'[':
+            in_class = True
+        elif ch == b'/':
+            body = data[slash + 1:i]
+            m = REGEX_FLAGS.match(data, i + 1)
+            return body, m.group(0), m.end()
+        elif ch in (b'\n', b'\r'):
+            return None
+        i += 1
+    return None
+
+
+def web_lookbehind_compat(source: bytes) -> bytes:
+    """Make regex literals with lookbehind parseable on iOS 15, keeping behaviour elsewhere."""
+    out = bytearray()
+    pos = 0
+    for match in LOOKBEHIND_LITERAL.finditer(source):
+        if match.start() < pos:
+            continue
+        found = _regex_literal_at(source, match.start())
+        if found is None:
+            continue
+        body, flags, end = found
+        out += source[pos:match.start()]
+        body_text = body.decode('utf-8', 'replace')
+        flags_text = flags.decode('ascii', 'replace')
+        out += (
+            '(function(){try{return new RegExp(' + json.dumps(body_text) +
+            ',' + json.dumps(flags_text) + ')}catch(e){return /(?!)/g}})()'
+        ).encode('utf-8')
+        pos = end
+    if not out:
+        return source
+    out += source[pos:]
+    return bytes(out)
+
+
+# 浏览器会加载的插件客户端：(目录前缀, 文件名前缀)。
+WEB_CLIENT_PREFIX = 'node_modules/@deepseek-ai/'
+WEB_CLIENT_DIR = '/lib/client'
+
+# PDF 预览面板里的静态块上下文没法用下面的扫描器安全改写（改完 node --check 不过），
+# 而它只在打开 PDF 时按需加载：宁可那个面板不可用，也不能让整个壳子挂掉。
+WEB_STATIC_SKIP = ('client.pdf.js',)
+
+
+def is_browser_client(name: str) -> bool:
+    """True for the plugin bundles the WebView fetches (client.js / client.*.js)."""
+    if not (name.startswith(WEB_CLIENT_PREFIX) and name.endswith('.js')):
+        return False
+    return WEB_CLIENT_DIR in name
+
+
+STATIC_BLOCK = re.compile(rb'(?<![.\w$])static\s*\{')
+
+
+def _skip_js_string(src: bytes, i: int, end: int) -> int:
+    quote = src[i]
+    i += 1
+    while i < end:
+        c = src[i]
+        if c == 0x5C:
+            i += 2
+            continue
+        if c == quote:
+            return i + 1
+        i += 1
+    return end
+
+
+def _skip_js_template(src: bytes, i: int, end: int) -> int:
+    i += 1
+    while i < end:
+        c = src[i]
+        if c == 0x5C:
+            i += 2
+            continue
+        if c == 0x60:
+            return i + 1
+        if c == 0x24 and i + 1 < end and src[i + 1] == 0x7B:
+            i += 2
+            depth = 1
+            while i < end and depth:
+                inner = src[i]
+                if inner in (0x27, 0x22):
+                    i = _skip_js_string(src, i, end)
+                    continue
+                if inner == 0x60:
+                    i = _skip_js_template(src, i, end)
+                    continue
+                if inner == 0x7B:
+                    depth += 1
+                elif inner == 0x7D:
+                    depth -= 1
+                i += 1
+            continue
+        i += 1
+    return end
+
+
+def _match_js_brace(src: bytes, brace: int, end: int) -> int | None:
+    """Index of the `}` matching the `{` at [brace], or None when unsure."""
+    depth = 1
+    i = brace + 1
+    while i < end:
+        c = src[i]
+        if c in (0x27, 0x22):
+            i = _skip_js_string(src, i, end)
+            continue
+        if c == 0x60:
+            i = _skip_js_template(src, i, end)
+            continue
+        if c == 0x2F and i + 1 < end and src[i + 1] == 0x2A:
+            close = src.find(b'*/', i + 2, end)
+            i = end if close < 0 else close + 2
+            continue
+        if c == 0x2F and i + 1 < end and src[i + 1] == 0x2F:
+            close = src.find(b'\n', i + 2, end)
+            i = end if close < 0 else close + 1
+            continue
+        if c == 0x7B:
+            depth += 1
+        elif c == 0x7D:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def web_static_block_compat(source: bytes) -> bytes:
+    """Rewrite `static { ... }` class blocks into static field initialisers.
+
+    Each block is located and matched on its own so a stray regex or template
+    literal elsewhere in the file cannot throw the scan off.
+    """
+    end = len(source)
+    out = bytearray()
+    pos = 0
+    counter = 0
+    for match in STATIC_BLOCK.finditer(source):
+        if match.start() < pos:
+            continue
+        brace = source.find(b'{', match.start(), min(end, match.start() + 64))
+        if brace < 0:
+            continue
+        close = _match_js_brace(source, brace, end)
+        if close is None:
+            continue
+        out += source[pos:match.start()]
+        out += b'static __ios15_' + str(counter).encode() + b'=(()=>{'
+        out += source[brace + 1:close]
+        out += b'})();'
+        pos = close + 1
+        counter += 1
+    if counter == 0:
+        return source
+    out += source[pos:]
+    return bytes(out)
 
 
 # Keep platform diagnostics local to the iOS output; each exact edit must match once.
@@ -503,6 +691,8 @@ def specialize(expanded, out, composer):
             # 入口 bundle 才补运行时接口；语言包是数据，vendor 排在它后面加载。
             is_entry = name.rsplit('/', 1)[-1].startswith('index-')
             asset_patched = web_bundle_compat(asset_original, shim=is_entry)
+            asset_patched = web_static_block_compat(asset_patched)
+            asset_patched = web_lookbehind_compat(asset_patched)
             if asset_patched is asset_original:
                 continue
             asset.write_bytes(asset_patched)
@@ -510,6 +700,24 @@ def specialize(expanded, out, composer):
             entries[name]['size'] = len(asset_patched)
             rewritten += 1
         print(f'iOS web compat: rewrote ES2022 static blocks in {rewritten} bundle(s)', flush=True)
+        # 插件客户端是引擎按需下发的另一批文件，构建期同样要过一遍后行断言和静态块。
+        clients = 0
+        for name in list(entries):
+            if not is_browser_client(name):
+                continue
+            if any(name.endswith(skip) for skip in WEB_STATIC_SKIP):
+                continue
+            path = tree / 'files' / name
+            original = path.read_bytes()
+            patched = web_lookbehind_compat(original)
+            patched = web_static_block_compat(patched)
+            if patched is original:
+                continue
+            path.write_bytes(patched)
+            entries[name]['sha256'] = composer.digest(patched)
+            entries[name]['size'] = len(patched)
+            clients += 1
+        print(f'iOS web compat: rewrote lookbehind/static blocks in {clients} plugin client(s)', flush=True)
         identity = composer.digest(composer.json_bytes({
             'target': 'ios', 'dsh': manifest['dshVersion'],
             'node': manifest['nodeVersion'], 'files': manifest['files'],
