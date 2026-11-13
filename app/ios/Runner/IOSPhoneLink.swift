@@ -103,6 +103,14 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
     let args = call.arguments as? [String: Any] ?? [:]
     switch call.method {
     case "status": reply(status())
+    // 「不再逐次确认」开关：读写的就是「允许并记住」那一个键。
+    case "consentStatus": reply(IOSPhoneTaskConsent.alwaysAllowEnabled)
+    case "setConsentAlways":
+      guard let value = args["enabled"] as? Bool else { reply(answer(false, code: "ERR_PHONE_ARGUMENTS")); return }
+      IOSPhoneTaskConsent.alwaysAllowEnabled = value
+      invalidate()
+      emit()
+      reply(answer(true))
     case "cancelPreparation":
       cancelOperation(); reply(answer(true))
     case "restoreClipboard", "discardSavedClipboard":
