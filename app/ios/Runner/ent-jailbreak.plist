@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.io.github.ccch1mneyyy.dshgo</string>
+	</array>
+	<!-- 越狱设备的手机操控：读屏与 HID 注入都要跳出沙盒。
+	     no-sandbox 让进程能读到 /var/jb、能对系统 HID 事件系统派发事件；
+	     没有它，抓屏可能只拿到自己、点按和滑动会被内核静默丢弃。
+	     hid.client.event-dispatch 是构造事件的授权，
+	     springboard.launchapplications 是 SBSLaunchApplicationWithIdentifier
+	     打开其它 App 的授权。TrollStore 安装时会原样保留这些 entitlements。 -->
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-dispatch</key>
+	<true/>
+	<key>com.apple.springboard.launchapplications</key>
+	<true/>
+</dict>
+</plist>
