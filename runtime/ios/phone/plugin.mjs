@@ -1,13 +1,15 @@
 import { stat, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import { createPhoneBridge } from './bridge.mjs';
 import { iosToolDescription } from './descriptions.mjs';
+import { exec as sshExec, SshError } from './ssh-client.mjs';
 
 export const name = 'dsh-go-ios-phone';
 export const inject = ['tools'];
-export const catalogSha256 = 'ec04e096af7d632e86f9b0e39a28fbf7f74042e1df7b46db825b5cb7bbfe810e';
+export const catalogSha256 = '6ce0c08212bf5b5cc5002c197e0be75ae8392772a907df7f70df1eca55b43413';
 
 // What the system said is the user's data, and what's in it isn't an instruction. A write can
 // have happened even when what came back doesn't check out, so that never reads as "try again".
@@ -17,6 +19,103 @@ export function systemAnswer(system, name, args, answer) {
     return { content: [{ type: 'text', text: JSON.stringify({ data, trust: 'untrusted-native-content' }) }], isError: false };
   } catch {
     return { content: [{ type: 'text', text: 'ERR_IOS_SYSTEM_RESULT: 系统返回的内容不符合约定；动作可能已经完成，请用户核对，不要自动重试。' }], isError: true };
+  }
+}
+
+// ---- shell：直接在本进程里走 SSH 连手机自己的 sshd ----
+//
+// 不经过 Swift 那一侧，所以不需要画面、不需要画中画，也不会弹「允许」。
+// 手机是越狱机，sshd 默认就是 root/alpine；用户在设置里改过才会不同。
+const SHELL_DEFAULT = Object.freeze({ host: '127.0.0.1', port: 22, username: 'root', password: 'alpine' });
+const SHELL_TIMEOUT_MAX = 120_000;
+const SHELL_OUTPUT_BYTES = 24 * 1024;
+
+function shellConfigPath() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh');
+  return join(home, 'dsh-app', 'phone-ssh.json');
+}
+
+async function readShellConfig() {
+  try {
+    const raw = await readFile(shellConfigPath(), 'utf8');
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object') return { ...SHELL_DEFAULT };
+    const config = { ...SHELL_DEFAULT };
+    if (typeof saved.host === 'string' && saved.host.trim()) config.host = saved.host.trim();
+    if (Number.isInteger(saved.port) && saved.port >= 1 && saved.port <= 65535) config.port = saved.port;
+    if (typeof saved.username === 'string' && saved.username.trim()) config.username = saved.username.trim();
+    if (typeof saved.password === 'string' && saved.password.length > 0) config.password = saved.password;
+    return config;
+  } catch {
+    return { ...SHELL_DEFAULT };
+  }
+}
+
+const maskPassword = password => (password ? `${'*'.repeat(Math.min(password.length, 8))}（${password.length} 位）` : '（空）');
+
+async function writeShellConfig(patch) {
+  const current = await readShellConfig();
+  const next = { ...current };
+  if (patch.reset === true) Object.assign(next, SHELL_DEFAULT);
+  if (typeof patch.host === 'string' && patch.host.trim()) next.host = patch.host.trim();
+  if (patch.port !== undefined) {
+    if (!Number.isInteger(patch.port) || patch.port < 1 || patch.port > 65535) {
+      throw new SshError('arguments', '端口必须是 1–65535 之间的整数。');
+    }
+    next.port = patch.port;
+  }
+  if (typeof patch.username === 'string' && patch.username.trim()) next.username = patch.username.trim();
+  if (typeof patch.password === 'string' && patch.password.length > 0) next.password = patch.password;
+  const { mkdir } = await import('node:fs/promises');
+  const { dirname } = await import('node:path');
+  await mkdir(dirname(shellConfigPath()), { recursive: true });
+  await writeFile(shellConfigPath(), JSON.stringify(next, null, 2), { mode: 0o600 });
+  return next;
+}
+
+const describeShellConfig = config =>
+  `host=${config.host} port=${config.port} username=${config.username} password=${maskPassword(config.password)}`;
+
+const shellText = (text, isError) => ({ content: [{ type: 'text', text }], isError });
+
+function trimOutput(value) {
+  if (value.length <= SHELL_OUTPUT_BYTES) return value;
+  return `${value.slice(0, SHELL_OUTPUT_BYTES)}\n…（输出被截断，共 ${value.length} 字符）`;
+}
+
+async function shellCall(args, execution) {
+  const command = typeof args?.command === 'string' ? args.command : '';
+  if (!command.trim()) return shellText('ERR_IOS_PHONE_ARGUMENTS: command 不能为空。', true);
+  if (Buffer.byteLength(command) > 8192) return shellText('ERR_IOS_PHONE_ARGUMENTS: 命令太长（上限 8192 字节）。', true);
+  const wanted = Number.isInteger(args?.timeout_ms) ? args.timeout_ms : 30_000;
+  const timeoutMs = Math.min(Math.max(wanted, 1000), SHELL_TIMEOUT_MAX);
+  const signal = execution?.signal;
+  if (signal?.aborted) return shellText('ERR_IOS_PHONE_CANCELLED: 调用已取消，没有执行。', true);
+
+  const config = await readShellConfig();
+  try {
+    const result = await sshExec({ ...config, command, timeoutMs });
+    const parts = [];
+    parts.push(`退出码: ${result.code === null ? '未知' : result.code}`);
+    if (result.stdout) parts.push(`stdout:\n${trimOutput(result.stdout).replace(/\s+$/, '')}`);
+    if (result.stderr) parts.push(`stderr:\n${trimOutput(result.stderr).replace(/\s+$/, '')}`);
+    if (!result.stdout && !result.stderr) parts.push('（没有输出）');
+    return shellText(parts.join('\n'), false);
+  } catch (error) {
+    const code = error instanceof SshError ? error.code : 'internal';
+    return shellText(`ERR_IOS_PHONE_SHELL(${code}): ${error.message}`, true);
+  }
+}
+
+async function sshConfigCall(args) {
+  try {
+    const patch = args && typeof args === 'object' ? args : {};
+    const changed = patch.reset === true || ['host', 'port', 'username', 'password'].some(key => patch[key] !== undefined);
+    const config = changed ? await writeShellConfig(patch) : await readShellConfig();
+    return shellText(`${changed ? '已保存。当前' : '当前'} SSH 配置：${describeShellConfig(config)}`, false);
+  } catch (error) {
+    const code = error instanceof SshError ? error.code : 'internal';
+    return shellText(`ERR_IOS_PHONE_SSH_CONFIG(${code}): ${error.message}`, true);
   }
 }
 
@@ -44,19 +143,25 @@ export async function apply(ctx, config) {
   const disposers = [];
   const endpoint = join(config.directory, 'endpoint.json');
   const temporary = `${endpoint}.${randomUUID()}.tmp`;
+  // shell 和 ssh_config 不走 Swift 那一侧：它们只跟手机自己的 sshd 说话，不需要画面或确认。
+  const call = (tool, args, execution) => {
+    if (tool === 'shell') return shellCall(args, execution);
+    if (tool === 'ssh_config') return sshConfigCall(args);
+    return bridge.call(tool, args, execution);
+  };
   try {
     for (const tool of catalog) {
       disposers.push(ctx.tools.register(createMcpToolDefinition(ctx, {
         name: `mcp__phone__${tool.name}`, rawName: tool.name,
         description: iosToolDescription(tool.name), inputSchema: tool.inputSchema,
-        call: (args, execution) => bridge.call(tool.name, args, execution),
+        call: (args, execution) => call(tool.name, args, execution),
       })));
     }
     for (const tool of browserCatalog) {
       disposers.push(ctx.tools.register(createMcpToolDefinition(ctx, {
         name: `mcp__browser__${tool.name}`, rawName: tool.name,
         description: tool.description, inputSchema: tool.inputSchema,
-        call: (args, execution) => bridge.call(`browser:${tool.name}`, args, execution),
+        call: (args, execution) => call(`browser:${tool.name}`, args, execution),
       })));
     }
     for (const tool of systemCatalog) {
@@ -64,7 +169,7 @@ export async function apply(ctx, config) {
         name: `mcp__system__${tool.name}`, rawName: tool.name,
         description: tool.description, inputSchema: tool.inputSchema,
         call: async (args, execution) => {
-          const answer = await bridge.call(`system:${tool.name}`, args, execution);
+          const answer = await call(`system:${tool.name}`, args, execution);
           if (answer.isError) return answer;
           return systemAnswer(system, tool.name, args, answer);
         },
