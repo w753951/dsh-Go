@@ -893,6 +893,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
   /// Flutter 的 Clipboard 只管文本，图片要读 UIPasteboard，所以走原生。
   /// 读出来是 PNG；托盘里和从相册选的图一样，可以删掉再重选。
   Future<void> _pasteImage() async {
+    // 先给一次触感，确认点击真的到达了按钮（点不动时能立刻分辨是
+    // 命中测试的问题还是读图失败）。
+    HapticFeedback.selectionClick();
     final pasted = await PasteboardImage.read();
     if (!mounted) return;
     if (pasted == null) {
@@ -900,7 +903,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
       return;
     }
     _addDrafts([DraftAttachment.sniff('${appL10n.fileImageName}.png', pasted.data)]);
-    HapticFeedback.selectionClick();
   }
 
   /// 剪贴板里有没有图：决定「粘贴」键要不要出现。
@@ -1963,17 +1965,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                     onContentInserted: connected ? _pasteContent : null,
                                     onStop: _stop,
                                     hasAttachments: _drafts.isNotEmpty,
-                                    leading: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        AttachButton(onPressed: connected ? _attach : null),
-                                        if (connected && _pasteboardHasImage)
-                                          Padding(
-                                            padding: const EdgeInsets.only(left: 2),
-                                            child: PasteImageButton(onPressed: _pasteImage),
-                                          ),
-                                      ],
-                                    ),
+                                    leading: AttachButton(onPressed: connected ? _attach : null),
+                                    pasteKey: connected && _pasteboardHasImage
+                                        ? PasteImageButton(onPressed: _pasteImage)
+                                        : null,
                                     keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
                                     footer: _composerOpens(context) && !isChild
                                         ? ComposerModelPill(
