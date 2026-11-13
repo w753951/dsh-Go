@@ -165,7 +165,7 @@ final class IOSPhoneTaskConsent {
       return live() && foreground
     }
     let suffix = needsTarget
-      ? "\n\n允许后，请自行切回要操控的界面。DSH Go 会重新核对屏幕；界面变化或画中画停止时不继续。通知点击本身不批准。"
+      ? "\n\n允许后，请自行切回要操控的界面。DSH Go 会重新核对屏幕；界面变化时不继续。通知点击本身不批准。"
       : "\n\n仅执行本次调用；这不批准后续动作。"
     let clipboardSteps = (try? IOSPhoneOperation(request))?.usesClipboard == true
       ? "\n\n如果使用 CoreDevice 输入非 ASCII 文字：先切回目标检查焦点，再回到 DSH Go 确认临时剪贴板，最后切回目标粘贴。即使没有通知，也请在焦点点击后回到本 App；焦点检查未通过时不会修改剪贴板。"
