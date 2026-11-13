@@ -49,6 +49,7 @@ class Composer extends StatefulWidget {
     this.sessionReady = true,
     this.accessory,
     this.leading,
+    this.pasteKey,
     this.tray,
     this.hasAttachments = false,
     this.onSendOptions,
@@ -87,6 +88,9 @@ class Composer extends StatefulWidget {
 
   /// 输入框左边的 40dp 件(＋ 附件)。
   final Widget? leading;
+
+  /// 「粘贴图片」键：和发送键同一行，靠左。剪贴板里没图时为 null。
+  final Widget? pasteKey;
 
   /// 输入框上方的一条(引文、待发送的附件):出现时展开,拿掉时收起。
   final Widget? tray;
@@ -522,6 +526,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (accessory != null) ...[accessory, const SizedBox(width: _keyGap)],
+                          if (pasteKey != null) ...[pasteKey!, const SizedBox(width: _keyGap)],
                           sendKey,
                         ],
                       ),
