@@ -70,6 +70,15 @@ final class IOSPhoneTaskConsent {
   static func clearAlwaysAllow() {
     UserDefaults.standard.set(false, forKey: "dsh.ios.phone.consent.always")
   }
+
+  /// 设置页的「不再逐次确认」开关直接读写这个值。
+  ///
+  /// 它和「允许并记住」是同一个 UserDefaults 键：打开后下一次手机动作不再弹授权页，
+  /// 关掉后回到原来的流程。刻意做成静态：设置页在还没有任何一次调用时也要能改。
+  static var alwaysAllowEnabled: Bool {
+    get { UserDefaults.standard.bool(forKey: "dsh.ios.phone.consent.always") }
+    set { UserDefaults.standard.set(newValue, forKey: "dsh.ios.phone.consent.always") }
+  }
   /// Called synchronously, once, after the exact current grant has been cleared.
   /// No request/presenter closure is retained for the thirty-minute lifetime.
   var onExpiration: ((String, String) -> Void)?
