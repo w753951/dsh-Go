@@ -141,6 +141,8 @@ final class IOSPhoneLink: NSObject, FlutterStreamHandler, @preconcurrency UIDocu
       guard let value = args["enabled"] as? Bool else { reply(answer(false, code: "ERR_PHONE_ARGUMENTS")); return }
       if !value {
         defaults.set(false, forKey: "dsh.ios.phone.link.enabled")
+        // 关掉连接就把「允许并记住」一起撤销，下次使用重新确认一次。
+        IOSPhoneTaskConsent.clearAlwaysAllow()
         cancelOperation(); invalidate(); reply(answer(true)); emit(); return
       }
       begin(reply) { [weak self] id in
