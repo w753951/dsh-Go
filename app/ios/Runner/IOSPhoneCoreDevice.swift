@@ -818,6 +818,184 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     return Outcome(status: 0, metadata: Self.json(["outcome": "read", "kind": "apps"]), bytes: data)
   }
 
+  /// 内置的已装应用兜底表：沙盒里的 LSApplicationWorkspace 经常返回空，
+  /// 有了它「打开微信」这类按名字找包名的请求仍然能解析。
+  private static let builtinApplications: [(name: String, id: String)] = [
+    ("19楼", "com.19lou.nineteenlou"),
+    ("21财经", "com.21newmedia.ePaper-iPhone"),
+    ("3d Scanner App", "com.laan.labs.3dScannerPro"),
+    ("AmbientLight", "com.bigpanda.development.Ex-USB"),
+    ("Apps Manager", "com.tigisoftware.ADManager"),
+    ("Authenticator", "com.microsoft.azureauthenticator"),
+    ("Books", "com.apple.iBooks"),
+    ("Calendar", "com.apple.mobilecal"),
+    ("ChatX", "com.app.ChatGPTX"),
+    ("Chrome", "com.google.chrome.ios"),
+    ("CocoaTop", "ru.domo.cocoatop64"),
+    ("Compass", "com.apple.compass"),
+    ("Contacts", "com.apple.MobileAddressBook"),
+    ("DAMA", "tech.baye.placeholder"),
+    ("DJI GO 4", "com.dji.go"),
+    ("DSH Go", "io.github.ccch1mneyyy.dshgo"),
+    ("DeepSeek", "com.deepseek.chat"),
+    ("Discord", "com.hammerandchisel.discord"),
+    ("DowngradeApp", "com.netskao.downgradeapp"),
+    ("ESign", "xyz.yyyue.esign"),
+    ("FaceTime", "com.apple.facetime"),
+    ("Files", "com.apple.DocumentsApp"),
+    ("Filza", "com.tigisoftware.Filza"),
+    ("Flex 3 Beta", "Flex3"),
+    ("GTA Car Tracker", "com.icraze.gtatracker"),
+    ("GitHub", "com.github.stormbreaker.prod"),
+    ("HashPhotos", "com.kobaltlab.HashPhotos"),
+    ("Home", "com.apple.Home"),
+    ("IMASS", "www.glinkwin.com.imass"),
+    ("Infuse", "com.firecore.infuse"),
+    ("JetSign", "com.jetsign.app"),
+    ("Kimi", "com.moonshot.kimichat"),
+    ("Kwai", "com.jiangjia.gif"),
+    ("LOY SPACE", "com.yskd.loywf"),
+    ("LocalSend", "org.localsend.localsendApp"),
+    ("Maps", "com.apple.Maps"),
+    ("Measure", "com.apple.measure"),
+    ("Mi Router", "com.xiaomi.miwifi"),
+    ("MiHome", "com.xiaomi.mihome"),
+    ("MotionSource", "cc.shiftinv.motionsource"),
+    ("NFC门禁", "com.amywhile.Aemulo2"),
+    ("Notes", "com.apple.mobilenotes"),
+    ("PS", "com.adobe.PSMobile"),
+    ("PayPal", "com.yourcompany.PPClient"),
+    ("Phone", "com.apple.mobilephone"),
+    ("Piiico", "com.abighead.pico"),
+    ("Print Utility", "jp.co.fujixerox.print.PrintUtil"),
+    ("QQ", "com.tencent.mqq"),
+    ("QQ邮箱", "com.tencent.qqmail"),
+    ("Quantumult X", "com.crossutility.quantumult-x"),
+    ("RHXPlus", "com.rhxled.LED-CRP"),
+    ("Reminders", "com.apple.reminders"),
+    ("RingTonesManager", "com.netskao.ringtonesmanager"),
+    ("SMRTE", "com.rsl.LtFuture"),
+    ("SMRTE C", "com.laitecn.smarthome"),
+    ("Saily", "wiki.qaq.chromatic.release"),
+    ("Scrcpy Remote", "com.mobile.scrcpy-ios"),
+    ("Shadowrocket", "com.liguangming.Shadowrocket"),
+    ("Shortcuts", "com.apple.shortcuts"),
+    ("Sileo", "org.coolstar.SileoStore"),
+    ("SpeedTest", "co.allconnected.speedtest"),
+    ("Stiiitch", "com.abighead.stiiitch"),
+    ("Stream", "com.fish.stream"),
+    ("Support", "com.apple.supportapp"),
+    ("TV Assist", "com.e2esoft.TV-Assist"),
+    ("Telegram", "ph.telegra.Telegraph"),
+    ("Terminal#", "com.making-app.RemTerm"),
+    ("TestFlight", "com.apple.TestFlight"),
+    ("TikTok", "com.zhiliaoapp.musically"),
+    ("Tips", "com.apple.tips"),
+    ("TrollDecrypt2", "com.app.troll.TrollDecrypt2"),
+    ("TrollFools", "wiki.qaq.TrollFools"),
+    ("TrollLEDs", "com.ps.TrollLEDs"),
+    ("TrollNonce", "com.opa334.trollnonce"),
+    ("TrollStore", "com.opa334.TrollStore"),
+    ("UTM", "com.utmapp.UTM"),
+    ("Varlens", "com.auramarker.varlens"),
+    ("Video Compressor", "com.rockybrain.videocompressor"),
+    ("VoiceMemos", "com.apple.VoiceMemos"),
+    ("WaterPurifier", "com.yunmi.vmall"),
+    ("Weather", "com.apple.weather"),
+    ("WidgetArt", "com.ziheng.widgetart"),
+    ("Widgy", "com.woodsign.Widgy"),
+    ("Wind金融终端", "com.wind.info.iphone"),
+    ("Wink", "com.meitu.wink"),
+    ("X", "com.atebits.Tweetie2"),
+    ("XinaA15", "com.xina.jailbreak"),
+    ("YouTube", "com.google.ios.youtube"),
+    ("atvTools", "dev.vodik7.atvtools.atvTools"),
+    ("e-Control", "cn.com.broadlink.e-Control"),
+    ("waycam", "com.HisMobiCam.iOS"),
+    ("东新社", "com.gelonghui.dxpress"),
+    ("东方财富", "com.eastmoney.iphone"),
+    ("中信证券", "com.tzt.zxsc"),
+    ("中国联通", "com.chinaunicom.mobilebusiness"),
+    ("中国银行", "com.boc.BOCMBCI"),
+    ("交管12123", "com.tmri.12123"),
+    ("京东", "com.360buy.jdmobile"),
+    ("什么值得买", "com.smzdm.client.ios"),
+    ("体重日记", "com.kproduce.weightdiary"),
+    ("元宝", "com.tencent.hunyuan.app.chat"),
+    ("剪映", "com.lemon.lv"),
+    ("千问", "com.aliyun.ios.tongyi"),
+    ("华尔街见闻Int", "com.wallstreetcn.news.global"),
+    ("双摄相机", "com.gejiangs.DoubleCamare"),
+    ("叮咚", "com.eques.DoorBell"),
+    ("同花顺", "cn.com.10jqka.IHexin"),
+    ("哔哩哔哩", "tv.danmaku.bilianime"),
+    ("墨迹天气", "com.moji.MojiWeather"),
+    ("复盘盒子", "com.fupanhezi.app"),
+    ("天猫", "com.taobao.tmall"),
+    ("央视频", "com.cctv.yangshipin.app.iphone"),
+    ("夸克", "com.quark.browser"),
+    ("威锋", "com.feng.New.WPForumClient"),
+    ("安居客", "com.anjuke.anjuke"),
+    ("小旋风收音机", "com.xiaoxuanfeng.ILoveRadio"),
+    ("小白虾", "com.tzrl.tzrl"),
+    ("小米音箱", "com.xiaomi.mico"),
+    ("小黄历", "com.PP.ChinaCalendar"),
+    ("崩溃日志", "com.foxfort.KrashKopApp"),
+    ("巨潮资讯", "com.cninfo.juchaozixun"),
+    ("开盘啦", "com.kaipanla.www"),
+    ("录屏变声", "com.enjoy.screen.recorder"),
+    ("录音专家", "cn.recordrabbit.www"),
+    ("微信", "com.tencent.xin"),
+    ("悬浮窗", "com.news.FirstScreen"),
+    ("抖音", "com.ss.iphone.ugc.Aweme"),
+    ("招商银行", "com.cmbchina.MPBBank"),
+    ("拼多多", "com.xunmeng.pinduoduo"),
+    ("支付宝", "com.alipay.iphoneclient"),
+    ("新华社", "com.xinhuamm.d0001"),
+    ("新浪财经", "com.sina.stock"),
+    ("无人炊", "com.tempetekliy.dicook"),
+    ("有条下载", "com.paperclipglobal.LineGet"),
+    ("欢乐斗地主", "com.tencent.ioshlddz"),
+    ("比亚迪", "com.byd.BYDi"),
+    ("浙里办", "zjzwfw.gov.cn"),
+    ("淘宝", "com.taobao.taobao4iphone"),
+    ("淘股吧", "cn.com.taoguba.Taoguba-App-Client"),
+    ("清理工具", "com.ivanobilenchi.icleaner2"),
+    ("灵光", "com.antgroup.leopard.ios"),
+    ("特来电", "com.tgood.gotocharge"),
+    ("电池助手", "com.callassist.batteryinfolist"),
+    ("电视超人", "com.xiaomi.tvassistant"),
+    ("番茄小说", "com.dragon.read"),
+    ("百度地图", "com.baidu.map"),
+    ("百度网盘", "com.baidu.netdiskVIP"),
+    ("百度输入法", "com.baidu.inputMethod"),
+    ("盒马", "com.wdk.hmxs"),
+    ("硕眼探企", "com.amarsoft.irisk"),
+    ("网上国网", "com.wsgw.zsdl95598"),
+    ("美团", "com.meituan.imeituan"),
+    ("美图秀秀", "com.meitu.mtxx"),
+    ("美颜相机", "com.meitu.myxj"),
+    ("虚拟定位", "com.mika.LocationSimulation"),
+    ("蚂蚁阿福", "com.antgroup.aijk.iphone"),
+    ("蛋蛋不语", "com.danbo.dbxq"),
+    ("血压管理", "com.eulersoft.bloodpressurediary"),
+    ("装修记账", "com.mobivans.DecorationAccount"),
+    ("计算器", "com.apple.calculator"),
+    ("证券时报", "com.zqsbs.NewMedia"),
+    ("豆包", "com.bot.doubao"),
+    ("财联社", "cn.lanjing.cailianshe"),
+    ("账号本子", "com.wei.account"),
+    ("迅雷Beta", "com.xunlei.iosthunder"),
+    ("酷我音乐", "com.yeelion.kwplayer"),
+    ("金十数据", "com.jin10.lgd"),
+    ("问小白", "com.wenxiaobai.app"),
+    ("闲鱼", "com.taobao.fleamarket"),
+    ("阿里云盘", "com.alicloud.smartdrive"),
+    ("雪球", "com.xueqiu"),
+    ("韭研公社", "com.jbangit.LeekCommune"),
+    ("高德地图", "com.autonavi.amap"),
+  ]
+
   /// 用 LSApplicationWorkspace 列已装应用。
   ///
   /// 这条私有接口不依赖文件系统权限，所以没有 no-sandbox 也能拿到列表，
@@ -828,18 +1006,20 @@ final class IOSJailbreakDevice: @unchecked Sendable {
                  "/System/Library/Frameworks/CoreServices.framework/CoreServices"] {
       dlopen(path, RTLD_NOW)
     }
+    // 沙盒里常拿不到 objc_msgSend 或列表，这时用内置表兜底。
+    let fallback: () -> [[String: String]] = { Self.builtinApplications.map { ["name": $0.name, "id": $0.id] } }
     guard let handle = dlopen(nil, RTLD_NOW), let rawSend = dlsym(handle, "objc_msgSend") else {
-      return []
+      return fallback()
     }
     typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
     typealias MsgSend1 = @convention(c) (AnyObject, Selector, AnyObject?) -> AnyObject?
     let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
     let send1 = unsafeBitCast(rawSend, to: MsgSend1.self)
 
-    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return [] }
-    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return [] }
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return fallback() }
+    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return fallback() }
     guard let list = send1(workspace, NSSelectorFromString("allInstalledApplications"), nil) as? [AnyObject] else {
-      return []
+      return fallback()
     }
     let idSelector = NSSelectorFromString("bundleIdentifier")
     let nameSelector = NSSelectorFromString("localizedName")
@@ -851,6 +1031,8 @@ final class IOSJailbreakDevice: @unchecked Sendable {
       let name = (send0(item, nameSelector) as? String).flatMap { $0.isEmpty ? nil : $0 } ?? identifier
       result.append(["name": name, "id": identifier])
     }
+    // 列表拿到了但一条都解析不出来，同样退回内置表。
+    if result.isEmpty { return fallback() }
     return result.sorted { ($0["name"] ?? "") < ($1["name"] ?? "") }
   }
 
@@ -1110,6 +1292,52 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     guard let cls = NSClassFromString("LSApplicationWorkspace") else { return false }
     guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return false }
     return sendBool(workspace, NSSelectorFromString("openApplicationWithBundleID:"), bundleID as AnyObject)
+  }
+
+  // MARK: - 真后台判断
+
+  /// 当前真正显示在屏幕上的 App 的 bundle id；查不到时返回 nil。
+  ///
+  /// 越狱设备上装了「真后台」类 tweak 时，App 切走后
+  /// `UIApplication.applicationState` 可能仍然是 active，用它判断
+  /// 「我是不是前台」会得到错误答案。这里直接问 SpringBoard 谁在前台。
+  static func frontmostBundleID() -> String? {
+    if let handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                           RTLD_NOW) {
+      defer { dlclose(handle) }
+      if let raw = dlsym(handle, "SBSCopyFrontmostApplicationDisplayIdentifier") {
+        typealias Fn = @convention(c) () -> Unmanaged<CFString>?
+        if let value = unsafeBitCast(raw, to: Fn.self)()?.takeRetainedValue() {
+          let bundle = value as String
+          if !bundle.isEmpty { return bundle }
+        }
+      }
+    }
+    // 退一步用 LSApplicationWorkspace，不需要 SpringBoard 权限。
+    guard let main = dlopen(nil, RTLD_NOW), let rawSend = dlsym(main, "objc_msgSend") else { return nil }
+    typealias MsgSend0 = @convention(c) (AnyObject, Selector) -> AnyObject?
+    let send0 = unsafeBitCast(rawSend, to: MsgSend0.self)
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return nil }
+    guard let workspace = send0(cls, NSSelectorFromString("defaultWorkspace")) else { return nil }
+    guard let app = send0(workspace, NSSelectorFromString("frontmostApplication")) else { return nil }
+    return send0(app, NSSelectorFromString("bundleIdentifier")) as? String
+  }
+
+  /// 别的 App 正占据屏幕——也就是 DSH Go 不在前台。
+  ///
+  /// 先看真实前台 App；查不到时退回系统状态判断。装了「真后台」tweak
+  /// 时前者仍然准确，而后者会把 App 误报为前台。
+  static var otherAppInFront: Bool {
+    if let front = frontmostBundleID() { return front != Bundle.main.bundleIdentifier }
+    return UIApplication.shared.applicationState == .background
+  }
+
+  /// 不需要宠物画中画也能在后台继续工作。
+  ///
+  /// 真后台 tweak 保住进程时，宠物画中画不是必须的；此时允许手机操控
+  /// 跳过画中画的可用性要求，否则用户会永远卡在「请先选好宠物画中画」。
+  static var backgroundKeepAliveAvailable: Bool {
+    otherAppInFront && UIApplication.shared.isProtectedDataAvailable
   }
 
   static func json(_ values: [String: Any]) -> String {
