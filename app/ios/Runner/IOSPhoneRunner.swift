@@ -146,7 +146,8 @@ final class IOSPhoneRunner {
     guard link.enabled || link.xctestEnabled else {
       return .failure("手机连接和 XCTest 增强均未启用。请由用户在设置中选择；已保存配对不等于授权操控。")
     }
-    guard IOSPetOverlay.shared.isUsable || IOSPhoneCoreDevice.backgroundKeepAliveAvailable else {
+    // 画中画已移除：越狱机的真后台插件保证进程活着，这里只确认设备解锁。
+    guard IOSPhoneCoreDevice.backgroundKeepAliveAvailable else {
       return .failure("手机已锁定，没有读取或派发动作；请解锁后重新发起。")
     }
     let plan: IOSPhoneOperation
@@ -287,7 +288,7 @@ final class IOSPhoneRunner {
       let checked = await call(endpoint, request: request, current: live,
         method: "validate", parameters: ["screen": screen])
       guard !checked.isError, live(), consent.isGranted,
-        IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive else {
+        IOSPhoneCoreDevice.otherAppInFront else {
         return .failure("批准后未能重新核对 XCTest 屏幕，未派发该动作；请重新 screen。")
       }
       // key accepts an omitted screen in the public API, but the actual RPC
@@ -341,9 +342,7 @@ final class IOSPhoneRunner {
       && IOSPhoneLink.shared.xctestEnabled && UIApplication.shared.isProtectedDataAvailable
       && request.expiresAt > Date().timeIntervalSince1970 * 1000
       && (endpoint.runId == nil || self.selfRunner.owns(endpoint))
-      && (!needsTarget || (IOSPhoneCoreDevice.otherAppInFront
-        || (UIApplication.shared.applicationState == .background
-          && IOSPetOverlay.shared.isKeepingAlive))) }
+      && (!needsTarget || IOSPhoneCoreDevice.otherAppInFront) }
     guard permitted() else {
       return .failure(IOSPhoneSelfRunnerError.cancelled.message)
     }
