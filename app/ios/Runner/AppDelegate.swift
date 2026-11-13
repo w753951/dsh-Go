@@ -6,8 +6,6 @@ import UserNotifications
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var companionVoice: IOSCompanionVoice?
-  /// 输入框「粘贴图片」读剪贴板用；持有引用，别让它被回收。
-  private var pasteboardImage: PasteboardImageChannel?
 
   override func application(
     _ application: UIApplication,
@@ -64,7 +62,6 @@ import UserNotifications
       IOSPhoneControl.shared.register(messenger: registrar.messenger())
       IOSPhoneLink.shared.register(messenger: registrar.messenger(), presenter: { topViewController() })
       IOSPetOverlay.shared.register(registrar: registrar)
-      pasteboardImage = PasteboardImageChannel(messenger: registrar.messenger())
       companionVoice?.dispose()
       companionVoice = IOSCompanionVoice(messenger: registrar.messenger(), pipAudioConfigured: {
         IOSPetOverlay.shared.statusSnapshot["audioSessionConfigured"] as? Bool == true
