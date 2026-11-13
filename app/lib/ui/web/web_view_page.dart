@@ -21,6 +21,63 @@ import 'web_navigation.dart';
 import 'web_target.dart';
 import 'web_view_guard.dart';
 
+/// 在 Harness 网页端之前跑的兼容层。
+///
+/// 网页端用到的 `Object.hasOwn` 是 ES2022（Safari 15.4 / iOS 15.4 起）。
+/// 更早的 iOS 上它不存在，调用即 `TypeError`，模块脚本直接中断，
+/// React 挂不上任何东西 —— 表现就是整页纯白、连错误都不显示。
+///
+/// 这里补的是幂等定义：已经有的环境什么都不做。
+const List<UserScript> kWebCompatScripts = [
+  UserScript(
+    injectionTime: UserScriptInjectionTime.atDocumentStart,
+    content: r"""
+(function () {
+  if (typeof Object.hasOwn !== 'function') {
+    Object.defineProperty(Object, 'hasOwn', {
+      value: function hasOwn(object, property) {
+        if (object === null || object === undefined) {
+          throw new TypeError('Cannot convert undefined or null to object');
+        }
+        return Object.prototype.hasOwnProperty.call(Object(object), property);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (typeof Array.prototype.at !== 'function') {
+    Object.defineProperty(Array.prototype, 'at', {
+      value: function at(index) {
+        var length = this.length >>> 0;
+        var relative = Math.trunc(index) || 0;
+        var absolute = relative < 0 ? length + relative : relative;
+        return absolute < 0 || absolute >= length ? undefined : this[absolute];
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (typeof String.prototype.at !== 'function') {
+    Object.defineProperty(String.prototype, 'at', {
+      value: function at(index) {
+        var text = String(this);
+        var length = text.length;
+        var relative = Math.trunc(index) || 0;
+        var absolute = relative < 0 ? length + relative : relative;
+        return absolute < 0 || absolute >= length ? undefined : text.charAt(absolute);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+})();
+""",
+  ),
+];
+
+
 /// Full-bleed WebView with floating glass controls (back · title · reload · open).
 ///
 /// The page's own background runs edge to edge — behind the status bar, the
@@ -621,8 +678,7 @@ class WebKeyboard {
 }
 
 class _WebViewPageState extends State<WebViewPage> {
-  late WebViewController _controller;
-  late final AppLifecycleListener _lifecycle;
+  late WebViewController _controller;  late final AppLifecycleListener _lifecycle;
   late final WebViewGuard _guard = WebViewGuard(onGone: _onRendererGone);
   final _files = WebFileChooser();
   int _progress = 0;
@@ -725,6 +781,10 @@ class _WebViewPageState extends State<WebViewPage> {
           controller.addJavaScriptChannel('DshAppCompose', onMessageReceived: (m) => widget.link?._composed(m.message)),
         if (widget.dshWeb && widget.onSession != null)
           controller.addJavaScriptChannel('DshAppState', onMessageReceived: _onState),
+        // Harness 的网页端用了 Object.hasOwn（Safari 15.4 才有）。iOS 15.0
+        // 上它一调用就抛 TypeError，React 挂不上，页面永远空白。这个补丁
+        // 必须在任何模块脚本之前跑，所以要 document start。
+        if (widget.dshWeb) controller.runJavaScriptOnDocumentStart(kWebCompatScripts),
       ].map((f) => f.catchError((_) {})),
     );
     if (!mounted || controller != _controller) return;
@@ -737,8 +797,7 @@ class _WebViewPageState extends State<WebViewPage> {
   /// 加载完成后再探一次 DOM：iOS 上 WebKit 的渲染进程被系统回收后，
   /// 重建的 WebView 会安静地停在空白页，既不报错也不回调 renderer gone。
   /// 真的空白就给出重试入口，别让用户盯着白屏猜。
-  Future<void> _verifyRendered(WebViewController controller) async {
-    for (var attempt = 0; attempt < 3; attempt++) {
+  Future<void> _verifyRendered(WebViewController controller) async {    for (var attempt = 0; attempt < 3; attempt++) {
       await Future<void>.delayed(Duration(milliseconds: 700 + attempt * 700));
       if (!mounted || controller != _controller || _gone || _error != null) return;
       Object? length;
