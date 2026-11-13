@@ -1965,10 +1965,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                                     onContentInserted: connected ? _pasteContent : null,
                                     onStop: _stop,
                                     hasAttachments: _drafts.isNotEmpty,
-                                    leading: AttachButton(onPressed: connected ? _attach : null),
-                                    pasteKey: connected && _pasteboardHasImage
-                                        ? PasteImageButton(onPressed: _pasteImage)
-                                        : null,
+                                    leading: SizedBox(
+                                      width: 36,
+                                      height: 36,
+                                      child: _pasteboardHasImage && connected
+                                          ? PasteImageButton(onPressed: _pasteImage)
+                                          : AttachButton(onPressed: connected ? _attach : null),
+                                    ),
                                     keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
                                     footer: _composerOpens(context) && !isChild
                                         ? ComposerModelPill(
