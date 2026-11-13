@@ -13,7 +13,14 @@ if ! bash "$ROOT/tooling/ios/build-phone-self-runner.sh"; then
 fi
 
 log="$(mktemp)"
-flutter build ios "$@" 2>&1 | tee "$log"
+# Flutter 的 --no-codesign 只是不给产物签名；工程里 CODE_SIGN_STYLE 是
+# Automatic 时，xcodebuild 仍会去找 Development Team，找不到就在编译完成
+# 之后报 requires a selected Development Team。CI 上没有任何证书，
+# 所以把 Xcode 侧的签名一起关掉，构建完成后再由后面的步骤 ldid 重签。
+# 用环境变量而不是命令行参数：这与 tooling/ios/check-archive.sh 的做法一致。
+CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" EXPANDED_CODE_SIGN_IDENTITY="" \
+  flutter build ios "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 if [ "$status" -ne 0 ]; then
   # Flutter prints Xcode's message with its file on the line after.
