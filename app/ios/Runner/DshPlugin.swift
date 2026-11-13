@@ -139,6 +139,11 @@ private final class AppChannel {
       case "getTimeZoneId": result(TimeZone.current.identifier)
       // iOS doesn't let an app bring itself forward.
       case "bringToFront": result(nil)
+      // 谁真的在屏幕上。装了「真后台」类 tweak 时 App 可能一直报告自己是
+      // active，只看生命周期会把「人在别的 App 里」误判成「人在本 App 里」，
+      // 于是后台完成时的通知永远发不出去。这里直接问 SpringBoard。
+      case "frontmostBundleID":
+        result(IOSPhoneCoreDevice.frontmostBundleID() ?? NSNull())
       default: result(FlutterMethodNotImplemented)
       }
     }
