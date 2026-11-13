@@ -239,7 +239,7 @@ final class IOSPhoneTaskConsent {
       case .refused:
         if !unlocked { targetWaitFailureMessage = "手机已锁定，没有派发动作；请解锁后重新发起。" }
         else if !eligible { targetWaitFailureMessage = "本次请求已取消、过期或暂停，没有派发动作；这不表示增强开关关闭。" }
-        else if !inBackground { targetWaitFailureMessage = "DSH Go 仍在前台，未取得目标画面，没有派发动作。" }
+        else if !inBackground { targetWaitFailureMessage = "现在屏幕上还是 DSH Go 自己。请先用 open 打开目标应用，它到前台后我再读屏。" }
         else if !keepingAlive { targetWaitFailureMessage = "目标界面已改变，未派发动作；请重新发起。" }
         #if DSH_PHONE_SELF_RUNNER_DIAGNOSTICS
         IOSPhoneSelfRunner.diagnostic("target wait refused bg=\(background) eligible=\(eligible) pip=\(keepingAlive)")
