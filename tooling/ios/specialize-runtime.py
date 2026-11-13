@@ -59,6 +59,34 @@ def web_compat(html: bytes) -> bytes:
     return html.replace(marker, marker + WEB_COMPAT_SCRIPT, 1)
 
 
+# 类静态块 static{} 是 ES2022，Safari 16.4 才支持。iOS 15.0 的 WebKit 读到它直接语法错误，
+# 整个 bundle 一行都不会执行——这是 polyfill 救不了的那种，所以必须在构建时改写成等价的
+# 静态字段初始化器（Safari 14.1 起可用）：求值时机、this 绑定和副作用顺序都不变。
+WEB_ASSETS_PREFIX = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/'
+WEB_BUNDLE_FIXES = (
+    (
+        'static{for(const t of["error","info","warn","debug"])G8.prototype[t]=function(...r){return this()[t](...r)}}',
+        'static __dshIos15a=(()=>{for(const t of["error","info","warn","debug"])G8.prototype[t]=function(...r){return this()[t](...r)}})();',
+    ),
+    (
+        'static{Hs.is[Symbol.toPrimitive]=()=>Symbol.for("cordis.is"),Hs.prototype[Hs.is]=!0}',
+        'static __dshIos15b=(()=>{Hs.is[Symbol.toPrimitive]=()=>Symbol.for("cordis.is"),Hs.prototype[Hs.is]=!0})();',
+    ),
+)
+
+
+def web_bundle_compat(source: bytes) -> bytes:
+    """Rewrite the ES2022 class static blocks the iOS 15 WebKit cannot parse."""
+    try:
+        text = source.decode('utf-8')
+    except UnicodeDecodeError:
+        return source
+    original = text
+    for before, after in WEB_BUNDLE_FIXES:
+        text = text.replace(before, after)
+    return source if text == original else text.encode('utf-8')
+
+
 # Keep platform diagnostics local to the iOS output; each exact edit must match once.
 DIAGNOSTIC_EDITS = {
     'runtime/ohos/process/rg.mjs': (
@@ -368,6 +396,21 @@ def specialize(expanded, out, composer):
                 print('iOS web compat: injected the iOS 15 shim into ' + WEB_FRONTEND_INDEX, flush=True)
         else:
             print('iOS web compat: no web frontend entry in this composition; skipped', flush=True)
+        # 入口 HTML 只是 polyfill；bundle 里的 static{} 是语法层，必须改源码。
+        rewritten = 0
+        for name in list(entries):
+            if not name.startswith(WEB_ASSETS_PREFIX) or not name.endswith('.js'):
+                continue
+            asset = tree / 'files' / name
+            asset_original = asset.read_bytes()
+            asset_patched = web_bundle_compat(asset_original)
+            if asset_patched is asset_original:
+                continue
+            asset.write_bytes(asset_patched)
+            entries[name]['sha256'] = composer.digest(asset_patched)
+            entries[name]['size'] = len(asset_patched)
+            rewritten += 1
+        print(f'iOS web compat: rewrote ES2022 static blocks in {rewritten} bundle(s)', flush=True)
         identity = composer.digest(composer.json_bytes({
             'target': 'ios', 'dsh': manifest['dshVersion'],
             'node': manifest['nodeVersion'], 'files': manifest['files'],
