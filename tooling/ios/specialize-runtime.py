@@ -26,6 +26,39 @@ PRELOAD = 'runtime/ohos/preload.mjs'
 RELOCATION_FILES = ('runtime/ios/storage/relocate.mjs', 'runtime/ios/storage/preload.mjs')
 PRELOAD_BEFORE = "await import('./publication/preload.mjs');\n"
 PRELOAD_AFTER = PRELOAD_BEFORE + "await import('../ios/storage/preload.mjs');\n"
+# iOS 15.0 的 Safari 是 WebKit 611.1，没有 Object.hasOwn（ES2022，Safari 15.4 才有）也没有
+# Array.prototype.at。Harness 网页版在挂载 React 之前就调 Object.hasOwn，抛异常后页面停在
+# 空白的 index.html 上。WebView 没有 atDocumentStart 注入口，所以在入口 HTML 的 <head> 最前面
+# 内联一段兼容代码：它比 defer 的入口 bundle 先执行，页面就能正常渲染。
+WEB_FRONTEND_INDEX = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html'
+WEB_COMPAT_MARKER = b'dsh-ios15-compat'
+WEB_COMPAT_SCRIPT = (
+    b'<script>/*dsh-ios15-compat*/(function(){'
+    b'if(typeof Object.hasOwn!=="function"){'
+    b'Object.defineProperty(Object,"hasOwn",{value:function(t,k){'
+    b'return Object.prototype.hasOwnProperty.call(Object(t),k)},writable:true,configurable:true});}'
+    b'if(typeof Array.prototype.at!=="function"){'
+    b'Object.defineProperty(Array.prototype,"at",{value:function(n){'
+    b'var o=Object(this),len=o.length>>>0;n=Math.trunc(n)||0;if(n<0)n+=len;'
+    b'return (n<0||n>=len)?undefined:o[n]},writable:true,configurable:true});}'
+    b'if(typeof String.prototype.at!=="function"){'
+    b'Object.defineProperty(String.prototype,"at",{value:function(n){'
+    b'var s=String(this),len=s.length;n=Math.trunc(n)||0;if(n<0)n+=len;'
+    b'return (n<0||n>=len)?undefined:s.charAt(n)},writable:true,configurable:true});}'
+    b'})();</script>'
+)
+
+
+def web_compat(html: bytes) -> bytes:
+    """Compatibility shim for the iOS 15 WebView; byte-identical when already applied."""
+    if WEB_COMPAT_MARKER in html:
+        return html
+    marker = b'<head>'
+    if marker not in html:
+        return html
+    return html.replace(marker, marker + WEB_COMPAT_SCRIPT, 1)
+
+
 # Keep platform diagnostics local to the iOS output; each exact edit must match once.
 DIAGNOSTIC_EDITS = {
     'runtime/ohos/process/rg.mjs': (
@@ -321,6 +354,20 @@ def specialize(expanded, out, composer):
             (tree / 'files' / name).write_bytes(data)
             entries[name]['sha256'] = composer.digest(data)
             entries[name]['size'] = len(data)
+        # 网页版要在 iOS 15 的 WebView 里跑，就得补上它缺的那两个接口。
+        if WEB_FRONTEND_INDEX in entries:
+            web_path = tree / 'files' / WEB_FRONTEND_INDEX
+            web_original = web_path.read_bytes()
+            web_patched = web_compat(web_original)
+            if web_patched == web_original:
+                print('iOS web compat: entry HTML already carries the shim', flush=True)
+            else:
+                web_path.write_bytes(web_patched)
+                entries[WEB_FRONTEND_INDEX]['sha256'] = composer.digest(web_patched)
+                entries[WEB_FRONTEND_INDEX]['size'] = len(web_patched)
+                print('iOS web compat: injected the iOS 15 shim into ' + WEB_FRONTEND_INDEX, flush=True)
+        else:
+            print('iOS web compat: no web frontend entry in this composition; skipped', flush=True)
         identity = composer.digest(composer.json_bytes({
             'target': 'ios', 'dsh': manifest['dshVersion'],
             'node': manifest['nodeVersion'], 'files': manifest['files'],
