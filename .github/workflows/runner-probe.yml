@@ -1,0 +1,22 @@
+name: runner probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: hello
+        run: echo "linux runner ok"
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - name: hello
+        run: |
+          sw_vers
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "no xcode"
