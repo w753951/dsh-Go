@@ -1,6 +1,5 @@
 import Flutter
 import UIKit
-import UniformTypeIdentifiers
 
 /// 读一次剪贴板里的图片，给聊天输入框的「粘贴图片」用。
 ///
@@ -9,6 +8,9 @@ import UniformTypeIdentifiers
 ///
 /// 这里只做两件事：报告剪贴板里有没有图片、把图片读成 PNG 字节。不做
 /// 后台轮询、不缓存、不给别的进程留副本。每次调用读一次就结束。
+///
+/// 只用 UIKit 和 Foundation：`UIPasteboard.image` 已经能覆盖截图和相册
+/// 复制，不引 UniformTypeIdentifiers，少一个框架依赖就少一处构建风险。
 final class PasteboardImageChannel {
   private let methods: FlutterMethodChannel
 
@@ -85,11 +87,10 @@ final class PasteboardImageChannel {
     ])
   }
 
-  /// `pasteboard.image` 只认第一项；多选复制时自己找第一张能解码的。
+  /// `pasteboard.image` 只认第一项；多选或从别处复制时自己找第一张能解码的。
   private func firstImage(in pasteboard: UIPasteboard) -> UIImage? {
     for item in pasteboard.items {
-      for (type, value) in item {
-        guard let utType = UTType(type), utType.conforms(to: .image) else { continue }
+      for (_, value) in item {
         if let data = value as? Data, let image = UIImage(data: data) { return image }
         if let image = value as? UIImage { return image }
       }
