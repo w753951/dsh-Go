@@ -96,14 +96,18 @@ class BuiltinPlugins {
     for (final entity in profiles.listSync()) {
       if (entity is! Directory) continue;
       final name = entity.path.split('/').last;
-      final hasModules = Directory('${entity.path}/node_modules').existsSync();
-      steps.add('profile $name node_modules=$hasModules');
-      if (!hasModules) continue;
+      // 不要要求 node_modules 预先存在：全新 profile 里它就是没有的，
+      // 而我们要做的正是把它建起来。
       names.add(name);
+      final modules = Directory('${entity.path}/node_modules');
+      if (!modules.existsSync()) {
+        steps.add('创建 $name/node_modules');
+        modules.createSync(recursive: true);
+      }
       for (final plugin in bundled) {
         final source = Directory('${sourceRoot.path}/$plugin');
         if (!source.existsSync()) continue;
-        final target = Directory('${entity.path}/node_modules/$plugin');
+        final target = Directory('${modules.path}/$plugin');
         if (!target.existsSync()) {
           steps.add('复制 $plugin → $name');
           await _copy(source, target);
@@ -116,11 +120,11 @@ class BuiltinPlugins {
     }
     lastProfiles = names;
     if (names.isEmpty) {
-      lastResult = 'profile 下没有带 node_modules 的目录';
+      lastResult = 'profiles 下没有任何 profile 目录';
     } else if (seeded.isEmpty) {
-      lastResult = 'profile ${names.join(',')} 缺少插件源目录';
+      lastResult = '包内缺少插件源目录';
     } else {
-      lastResult = '已就绪 ${seeded.join(',')} → ${names.join(',')}';
+      lastResult = '已写入 ${seeded.join(',')} → ${names.join(',')}；重启本机引擎后生效';
     }
   }
 
