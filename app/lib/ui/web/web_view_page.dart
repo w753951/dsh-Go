@@ -688,6 +688,32 @@ class _WebViewPageState extends State<WebViewPage> {
     }
   }
 
+  /// 把网页控制台的消息也落到 `webview-console.log`。
+  ///
+  /// 白屏、断连这类问题都发生在浏览器里，引擎侧没有任何记录；没有这个文件，
+  /// 排查只能靠猜。只记 error/warning 和含异常关键字的行，避免日志爆炸。
+  void _logConsole(JavaScriptConsoleMessage message) {
+    final text = message.message;
+    final important = message.level == JavaScriptLogLevel.error ||
+        message.level == JavaScriptLogLevel.warning ||
+        text.contains('Unhandled') ||
+        text.contains('TypeError') ||
+        text.contains('ReferenceError') ||
+        text.contains('SyntaxError') ||
+        text.contains('reconnect');
+    if (!important) return;
+    try {
+      File('${Directory.systemTemp.path}/webview-console.log').writeAsStringSync(
+        '${DateTime.now().toIso8601String()} [${message.level.name}] '
+        '${text.length > 400 ? '${text.substring(0, 400)}…' : text}\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      // 同上：记录失败不影响页面。
+    }
+  }
+
   /// A new WebView for [WebViewPage.url].
   void _open() {
     _files.invalidate();
@@ -703,6 +729,7 @@ class _WebViewPageState extends State<WebViewPage> {
     await Future.wait(
       [
         controller.setJavaScriptMode(JavaScriptMode.unrestricted),
+        controller.setOnConsoleMessage(_logConsole),
         _files.attach(controller),
         controller.setNavigationDelegate(
           NavigationDelegate(
@@ -725,6 +752,7 @@ class _WebViewPageState extends State<WebViewPage> {
               _applyInsets();
               if (widget._adapt) unawaited(_injectPhoneLayout());
               if (widget.dshWeb) unawaited(_injectBackBridge());
+              if (widget.dshWeb) unawaited(_injectErrorHook());
               if (widget.dshWeb) unawaited(_injectOpenBridge());
               if (widget.dshWeb && widget.onSession != null) {
                 unawaited(_injectStateBridge());
@@ -772,6 +800,13 @@ class _WebViewPageState extends State<WebViewPage> {
           controller.addJavaScriptChannel('DshAppCompose', onMessageReceived: (m) => widget.link?._composed(m.message)),
         if (widget.dshWeb && widget.onSession != null)
           controller.addJavaScriptChannel('DshAppState', onMessageReceived: _onState),
+        // 网页里的未捕获异常走这里落盘，SSH 就能读到白屏/断连的真实原因。
+        if (widget.dshWeb)
+          controller.addJavaScriptChannel('DshWebLog',
+              onMessageReceived: (m) => _logConsole(JavaScriptConsoleMessage(
+                    level: JavaScriptLogLevel.error,
+                    message: m.message,
+                  ))),
       ].map((f) => f.catchError((_) {})),
     );
     if (!mounted || controller != _controller) return;
@@ -897,6 +932,38 @@ class _WebViewPageState extends State<WebViewPage> {
       await _controller.runJavaScript(await _backBridgeSource());
     } catch (_) {
       // Error page without a DOM: the next load injects again.
+    }
+  }
+
+  /// 把网页里的未捕获异常转成 Dart 侧的一条日志。
+  ///
+  /// `setOnConsoleMessage` 收不到 WKWebView 的未捕获异常，白屏和断连恰恰都是它们
+  /// 引起的。装一次 handler，异常就走 `DshWebLog` 通道写进 `webview-console.log`。
+  Future<void> _injectErrorHook() async {
+    const script = '''
+(function () {
+  if (window.__dshErrorHook) return;
+  window.__dshErrorHook = true;
+  function post(kind, text, extra) {
+    try {
+      window.DshWebLog.postMessage(kind + ': ' + text + (extra ? ' @ ' + extra : ''));
+    } catch (e) {}
+  }
+  window.addEventListener('error', function (e) {
+    var where = '';
+    try { where = (e.filename || '') + ':' + (e.lineno || 0) + ':' + (e.colno || 0); } catch (x) {}
+    post('error', (e && e.message) || String(e), where);
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var reason = e && e.reason;
+    post('rejection', (reason && (reason.stack || reason.message)) || String(reason), '');
+  }, true);
+})();
+''';
+    try {
+      await _controller.runJavaScript(script);
+    } catch (_) {
+      // 页面还没有 DOM：下次 onPageFinished 再来。
     }
   }
 
