@@ -375,11 +375,14 @@ final class IOSPhoneCoreActions {
                     current: @escaping () -> Bool) async throws -> IOSPhoneCoreReply {
     try require(current)
     let needsBackground = values["nativeFrameId"] != nil || values["op"] as? String == "screenshot"
-    // 别的 App 在屏幕上就够：宠物画中画只是保活手段之一，装了真后台 tweak
-    // 时不需要它。两者都不可用才拒绝。
-    let permitted = { current() && (!needsBackground ||
-      IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive) }
-    guard permitted() else { throw IOSPhoneScreenError.cancelled }
+    // 只要别的 App 真的占着屏幕就够。宠物画中画已从这条通道移除：越狱机的真后台
+    // 插件负责让进程活下去，保活不再是抓屏的条件。
+    let permitted = { current() && (!needsBackground || IOSPhoneCoreDevice.otherAppInFront) }
+    guard permitted() else {
+      // 这里只剩一种原因：DSH Go 自己占着屏幕，拍不到别人。说清楚该怎么办，
+      // 而不是丢一个 ERR_PHONE_CANCELLED 让人猜。
+      throw IOSPhoneOperationError(message: "DSH Go 现在在前台，拍不到别的应用。先让我打开目标应用（例如「打开微信」），它到后台后再读屏。")
+    }
     let reply: IOSPhoneCoreReply
     switch await core.request(values, ownerID: execution.ownerID, current: permitted) {
     case .failure(let error): throw error
@@ -399,7 +402,7 @@ final class IOSPhoneCoreActions {
   }
   private func requireBackground(_ current: () -> Bool) throws {
     try require(current)
-    guard IOSPhoneCoreDevice.otherAppInFront || IOSPetOverlay.shared.isKeepingAlive else {
+    guard IOSPhoneCoreDevice.otherAppInFront else {
       throw IOSPhoneOperationError(message: "目标界面已改变，停止继续派发。")
     }
   }
