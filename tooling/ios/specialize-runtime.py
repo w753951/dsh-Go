@@ -62,7 +62,29 @@ def web_compat(html: bytes) -> bytes:
 # 类静态块 static{} 是 ES2022，Safari 16.4 才支持。iOS 15.0 的 WebKit 读到它直接语法错误，
 # 整个 bundle 一行都不会执行——这是 polyfill 救不了的那种，所以必须在构建时改写成等价的
 # 静态字段初始化器（Safari 14.1 起可用）：求值时机、this 绑定和副作用顺序都不变。
+#
+# 另外：引擎实际返回的 index.html 是运行时动态生成的（40 KB 左右，带 <base href> 和 boot
+# 样式），不是 dist/index.html 那 1 KB 的静态入口。往静态 HTML 里塞 polyfill 没有任何效果，
+# 所以浏览器侧缺的 Object.hasOwn / Array.prototype.at 必须直接补在 bundle 自己的开头：
+# 模块求值时就执行，早于 bundle 内部任何一次调用。
 WEB_ASSETS_PREFIX = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/'
+WEB_BUNDLE_MARKER = 'dsh-ios15-compat'
+WEB_BUNDLE_SHIM = (
+    '/*' + WEB_BUNDLE_MARKER + '*/'
+    '(function(){'
+    'if(typeof Object.hasOwn!=="function"){'
+    'Object.defineProperty(Object,"hasOwn",{value:function(t,k){'
+    'return Object.prototype.hasOwnProperty.call(Object(t),k)},writable:true,configurable:true});}'
+    'if(typeof Array.prototype.at!=="function"){'
+    'Object.defineProperty(Array.prototype,"at",{value:function(n){'
+    'var o=Object(this),len=o.length>>>0;n=Math.trunc(n)||0;if(n<0)n+=len;'
+    'return (n<0||n>=len)?undefined:o[n]},writable:true,configurable:true});}'
+    'if(typeof String.prototype.at!=="function"){'
+    'Object.defineProperty(String.prototype,"at",{value:function(n){'
+    'var s=String(this),len=s.length;n=Math.trunc(n)||0;if(n<0)n+=len;'
+    'return (n<0||n>=len)?undefined:s.charAt(n)},writable:true,configurable:true});}'
+    '})();'
+)
 WEB_BUNDLE_FIXES = (
     (
         'static{for(const t of["error","info","warn","debug"])G8.prototype[t]=function(...r){return this()[t](...r)}}',
@@ -75,8 +97,12 @@ WEB_BUNDLE_FIXES = (
 )
 
 
-def web_bundle_compat(source: bytes) -> bytes:
-    """Rewrite the ES2022 class static blocks the iOS 15 WebKit cannot parse."""
+def web_bundle_compat(source: bytes, shim: bool = False) -> bytes:
+    """Rewrite the ES2022 class static blocks the iOS 15 WebKit cannot parse.
+
+    Only the entry bundle gets the runtime shim: the language chunks are data,
+    and the vendor chunk is loaded after it anyway.
+    """
     try:
         text = source.decode('utf-8')
     except UnicodeDecodeError:
@@ -84,6 +110,8 @@ def web_bundle_compat(source: bytes) -> bytes:
     original = text
     for before, after in WEB_BUNDLE_FIXES:
         text = text.replace(before, after)
+    if shim and WEB_BUNDLE_MARKER not in text:
+        text = WEB_BUNDLE_SHIM + text
     return source if text == original else text.encode('utf-8')
 
 
@@ -403,7 +431,9 @@ def specialize(expanded, out, composer):
                 continue
             asset = tree / 'files' / name
             asset_original = asset.read_bytes()
-            asset_patched = web_bundle_compat(asset_original)
+            # 入口 bundle 才补运行时接口；语言包是数据，vendor 排在它后面加载。
+            is_entry = name.rsplit('/', 1)[-1].startswith('index-')
+            asset_patched = web_bundle_compat(asset_original, shim=is_entry)
             if asset_patched is asset_original:
                 continue
             asset.write_bytes(asset_patched)
