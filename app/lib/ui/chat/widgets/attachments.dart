@@ -64,56 +64,9 @@ class AttachButton extends StatelessWidget {
   }
 }
 
-/// 剪贴板里有图片时才出现的小键：把那张图直接塞进附件托盘。
-///
-/// 和 ＋ 键同尺寸同形状，只是图标换成粘贴。它只在真的有图时显示，
-/// 所以不会长期占位置。
-class PasteImageButton extends StatelessWidget {
-  const PasteImageButton({super.key, required this.onPressed});
-
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final enabled = onPressed != null;
-    final zh = Localizations.localeOf(context).languageCode == 'zh';
-    final label = zh ? '粘贴图片' : 'Paste image';
-    return Semantics(
-      button: true,
-      enabled: enabled,
-      label: label,
-      child: Tooltip(
-        message: label,
-        child: InkResponse(
-          onTap: onPressed == null
-              ? null
-              : () {
-                  HapticFeedback.selectionClick();
-                  onPressed!();
-                },
-          radius: 20,
-          child: Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: scheme.primary.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              AppIcons.paste,
-              size: 20,
-              color: enabled ? scheme.primary : scheme.onSurface.withValues(alpha: 0.38),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// Picked-but-unsent attachments, in a strip above the composer's text.
-class ComposerTray extends StatelessWidget {  const ComposerTray({super.key, required this.items, required this.onRemove, this.labels = const []});
+class ComposerTray extends StatelessWidget {
+  const ComposerTray({super.key, required this.items, required this.onRemove, this.labels = const []});
 
   final List<DraftAttachment> items;
   final ValueChanged<DraftAttachment> onRemove;
