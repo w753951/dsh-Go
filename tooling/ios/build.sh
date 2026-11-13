@@ -23,6 +23,14 @@ CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
   flutter build ios "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 if [ "$status" -ne 0 ]; then
+  # Flutter 会把 xcodebuild 的原始输出吞掉，只吐一段通用的签名提示。
+  # 失败时把日志里跟编译有关的行全部倒出来，免得下一次还要靠猜。
+  echo "----- flutter build ios 失败，原始日志里的可疑行 -----"
+  grep -nE 'error:|Error:|\(Xcode\)|The following build commands failed|CompileSwift|SwiftCompile|ld:|Undefined symbol|not found for architecture|Command .* failed|cannot find|no such module|has no member' "$log" \
+    | cut -c1-800 | head -60 || true
+  echo "----- 日志尾部 80 行 -----"
+  tail -80 "$log" | cut -c1-800 || true
+  echo "----- 原始日志到此为止 -----"
   # Flutter prints Xcode's message with its file on the line after.
   awk '/\(Xcode\):|error:|Error:/ {
     line = $0
