@@ -4,10 +4,16 @@
 // 构建期把插件包放进 app bundle，启动时复制进 profile 的 node_modules，
 // 再把它加进 profile 包的 `dsh.profile.bundles`。
 //
+// 引擎的目录约定（见 app/ios/Runner/EngineChannel.swift）：
+//   guestRoot = <App>/Library/.../runtime/rootfs
+//   home      = guestRoot/root          ← LocalPaths.home 返回的就是这个
+//   dshHome   = home/.dsh
+//   profiles  = dshHome/profiles/<name>
+//
 // 边界：
 //   - 只处理已经存在 node_modules 的 profile（引擎至少启动过一次）；
 //   - 复制是幂等的，目标已在就跳过；
-//   - 任何一步失败都只记录，不影响启动，也不写坏已有的 package.json。
+//   - 任何一步失败都只记录，不影响启动。
 
 import 'dart:convert';
 import 'dart:io';
@@ -22,51 +28,66 @@ class BuiltinPlugins {
   /// 内置在 app bundle 里、需要补进 profile 的插件目录名。
   static const List<String> bundled = ['dsh-our-free-model'];
 
-  /// app bundle 里存放内置插件的位置（由构建脚本复制进去）。
+  /// app bundle 里存放内置插件的位置（由 CI 复制进去）。
   static const String bundleFolder = 'builtin-plugins';
 
-  /// App 可执行文件所在目录，也就是 .app 包本身。
+  /// 最近一次执行的诊断结果，供设置页展示。
+  static String lastResult = '尚未执行';
+  static List<String> lastProfiles = const [];
+  static List<String> lastSteps = const [];
+
   static String? get _appDirectory {
-    if (!Platform.isIOS && !Platform.isMacOS) return null;
     final executable = Platform.resolvedExecutable;
     if (executable.isEmpty) return null;
     return File(executable).parent.path;
   }
 
   static Future<void> ensure() async {
+    final steps = <String>[];
     try {
-      await _ensure();
+      await _ensure(steps);
     } catch (error) {
-      debugPrint('builtin plugins: skipped ($error)');
+      steps.add('异常: $error');
+    }
+    lastSteps = steps;
+    for (final step in steps) {
+      debugPrint('builtin plugins: $step');
     }
   }
 
-  /// 把这次注入看到的东西写成一行结果，供设置页或日志排查。
-  /// 返回 null 表示一切正常进了 profile，否则是卡在哪一步。
-  static String? lastResult;
-  static List<String> lastProfiles = const [];
-
-  static Future<void> _ensure() async {
+  static Future<void> _ensure(List<String> steps) async {
     final app = _appDirectory;
     if (app == null) {
       lastResult = '没有 app 目录';
+      steps.add('没有 app 目录');
       return;
     }
+    steps.add('app=$app');
+
     final sourceRoot = Directory('$app/$bundleFolder');
     if (!sourceRoot.existsSync()) {
       lastResult = '包里没有 $bundleFolder';
+      steps.add('缺 $bundleFolder');
       return;
     }
-    lastResult = '包内有 $bundleFolder';
+    final available = sourceRoot
+        .listSync()
+        .whereType<Directory>()
+        .map((d) => d.path.split('/').last)
+        .toList();
+    steps.add('包内插件: ${available.join(',')}');
 
     final home = LocalPaths.home;
+    steps.add('home=$home');
     if (home.isEmpty) {
-      lastResult = '还没有 home 路径';
+      lastResult = '还没有 home 路径（guestRoot 未就绪）';
       return;
     }
+
     final profiles = Directory('$home/.dsh/profiles');
+    steps.add('profiles=${profiles.path} exists=${profiles.existsSync()}');
     if (!profiles.existsSync()) {
-      lastResult = '引擎还没建 profile：${profiles.path}';
+      lastResult = '引擎还没建 profile';
       return;
     }
 
@@ -74,33 +95,37 @@ class BuiltinPlugins {
     final seeded = <String>[];
     for (final entity in profiles.listSync()) {
       if (entity is! Directory) continue;
-      final nodeModules = Directory('${entity.path}/node_modules');
-      if (!nodeModules.existsSync()) continue;
-      names.add(entity.path.split('/').last);
-      for (final name in bundled) {
-        final source = Directory('${sourceRoot.path}/$name');
+      final name = entity.path.split('/').last;
+      final hasModules = Directory('${entity.path}/node_modules').existsSync();
+      steps.add('profile $name node_modules=$hasModules');
+      if (!hasModules) continue;
+      names.add(name);
+      for (final plugin in bundled) {
+        final source = Directory('${sourceRoot.path}/$plugin');
         if (!source.existsSync()) continue;
-        final target = Directory('${nodeModules.path}/$name');
+        final target = Directory('${entity.path}/node_modules/$plugin');
         if (!target.existsSync()) {
-          debugPrint('builtin plugins: copying $name into ${entity.path}');
+          steps.add('复制 $plugin → $name');
           await _copy(source, target);
+        } else {
+          steps.add('$plugin 已在 $name');
         }
-        // 每次启动都确保 package.json 里有这一项：用户可能之前自己删掉了。
-        await _register(entity.path, name);
-        if (!seeded.contains(name)) seeded.add(name);
+        await _register(entity.path, plugin, steps);
+        if (!seeded.contains(plugin)) seeded.add(plugin);
       }
     }
     lastProfiles = names;
     if (names.isEmpty) {
-      lastResult = 'profile 目录下没有带 node_modules 的条目';
+      lastResult = 'profile 下没有带 node_modules 的目录';
     } else if (seeded.isEmpty) {
-      lastResult = '已在 profile（${names.join(',')}），但包内没有插件目录';
+      lastResult = 'profile ${names.join(',')} 缺少插件源目录';
     } else {
-      lastResult = '已注入 ${seeded.join(',')} → ${names.join(',')}';
+      lastResult = '已就绪 ${seeded.join(',')} → ${names.join(',')}';
     }
   }
 
   static Future<void> _copy(Directory source, Directory target) async {
+    target.createSync(recursive: true);
     for (final entity in source.listSync(recursive: true, followLinks: false)) {
       final relative = entity.path.substring(source.path.length + 1);
       final destination = '${target.path}/$relative';
@@ -114,34 +139,51 @@ class BuiltinPlugins {
   }
 
   /// 在 profile 的 package.json 里登记 bundle。解析失败就原样不动。
-  static Future<void> _register(String profile, String name) async {
+  static Future<void> _register(String profile, String name, List<String> steps) async {
     final manifest = File('$profile/package.json');
     if (!manifest.existsSync()) {
-      debugPrint('builtin plugins: no package.json in $profile');
+      steps.add('$profile 没有 package.json');
       return;
     }
     final text = await manifest.readAsString();
     final Map<String, dynamic> root;
     try {
       final decoded = jsonDecode(text);
-      if (decoded is! Map<String, dynamic>) return;
+      if (decoded is! Map<String, dynamic>) {
+        steps.add('package.json 不是对象');
+        return;
+      }
       root = decoded;
-    } catch (_) {
+    } catch (error) {
+      steps.add('package.json 解析失败: $error');
       return;
     }
-    // 有些 profile 的 package.json 还没写 dsh 段，补出来再登记。
-    final dsh = root['dsh'] is Map<String, dynamic>
-        ? root['dsh'] as Map<String, dynamic>
-        : (root['dsh'] = <String, dynamic>{}) as Map<String, dynamic>;
-    final profileSection = dsh['profile'] is Map<String, dynamic>
-        ? dsh['profile'] as Map<String, dynamic>
-        : (dsh['profile'] = <String, dynamic>{}) as Map<String, dynamic>;
-    final bundles = profileSection['bundles'] is List
-        ? profileSection['bundles'] as List
-        : (profileSection['bundles'] = <dynamic>[]) as List;
-    if (bundles.contains(name)) return;
+
+    final dshRaw = root['dsh'];
+    final Map<String, dynamic> dsh =
+        dshRaw is Map<String, dynamic> ? dshRaw : <String, dynamic>{};
+    root['dsh'] = dsh;
+    final profileRaw = dsh['profile'];
+    final Map<String, dynamic> profileSection =
+        profileRaw is Map<String, dynamic> ? profileRaw : <String, dynamic>{};
+    dsh['profile'] = profileSection;
+    final bundlesRaw = profileSection['bundles'];
+    final List<dynamic> bundles = bundlesRaw is List ? bundlesRaw : <dynamic>[];
+    profileSection['bundles'] = bundles;
+
+    if (bundles.contains(name)) {
+      steps.add('$name 已登记在 bundle 列表');
+      return;
+    }
     bundles.add(name);
-    debugPrint('builtin plugins: registering $name in $profile');
-    await manifest.writeAsString(const JsonEncoder.withIndent('  ').convert(root));
+    try {
+      await manifest.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(root),
+        flush: true,
+      );
+      steps.add('已登记 $name 到 ${profile.split('/').last}');
+    } catch (error) {
+      steps.add('写 package.json 失败: $error');
+    }
   }
 }
