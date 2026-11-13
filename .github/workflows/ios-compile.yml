@@ -116,6 +116,32 @@ jobs:
           [ -d "$src/vendor/magpie" ] && cp -R "$src/vendor/magpie" "$dest/vendor/" || true
           test -f "$dest/index.js" || { echo '::error title=plugin::the built-in plugin did not land'; exit 1; }
           echo "built-in plugin size: $(du -sh "$dest" | cut -f1)"
+      - name: Build the dshtouch CLI
+        run: |
+          xcrun --sdk iphoneos clang -arch arm64 -fobjc-arc -O2 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -miphoneos-version-min=15.0 \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
+            -o "$RUNNER_TEMP/dshtouch" tooling/ios/cli/dshtouch.m
+          file "$RUNNER_TEMP/dshtouch"
+          xcrun lipo "$RUNNER_TEMP/dshtouch" -verify_arch arm64
+          # 越狱工具要签名才能跑，用 ldid 附上平台权限。
+          brew install ldid || true
+          LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+          cat > "$RUNNER_TEMP/dshtouch.entitlements" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.hid.client.event-dispatch</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          "$LLDID" -S"$RUNNER_TEMP/dshtouch.entitlements" "$RUNNER_TEMP/dshtouch"
+          "$LLDID" -e "$RUNNER_TEMP/dshtouch"
+          du -h "$RUNNER_TEMP/dshtouch"
       - name: Sign with the HID entitlement
         run: |
           brew install ldid || true
@@ -143,7 +169,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-ipa
-          path: ${{ runner.temp }}/DSH-Go.ipa
+          path: |
+            ${{ runner.temp }}/DSH-Go.ipa
+            ${{ runner.temp }}/dshtouch
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
