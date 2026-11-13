@@ -838,9 +838,10 @@ final class IOSJailbreakDevice: @unchecked Sendable {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
     }
     lock.lock()
-    let index = nextFrame
     nextFrame &+= 1
-    let frameID = String(index)
+    // 上层的读屏解码器用 `UUID(uuidString:)` 校验 nativeFrameId，递增序号会被
+    // 判成无效帧，于是每次读屏都返回 ERR_PHONE_SCREEN_INVALID。这里必须给 UUID。
+    let frameID = UUID().uuidString
     lastFrameID = frameID
     lock.unlock()
     let w = Int(image.size.width * image.scale)
