@@ -32,7 +32,6 @@ import 'action_log_page.dart';
 import 'a11y_restore_sheet.dart';
 import 'app_rules_page.dart';
 import 'dnd_mode_page.dart';
-import 'ios_pet_pip_section.dart';
 import 'ios_phone_link_section.dart';
 import 'phone_disclosure_sheet.dart';
 import 'phone_background_guide.dart';
@@ -445,9 +444,8 @@ class _PhoneControlScreenState extends ConsumerState<PhoneControlScreen> {
           const PhoneLinkSection(),
           PageFootnote(l10n.iosPhoneLinkIntro),
           const SizedBox(height: 24),
-          const IosPetPipSection(),
-          PageFootnote(l10n.iosPetPipHint),
-          const SizedBox(height: 24),
+          // 宠物画中画已从手机操控里移除：越狱机的真后台插件负责让 App 在后台
+          // 活着，读屏和点按都不再要求画中画，所以这一页不再有它的开关。
           ListPageCard(children: [returnRow]),
           const SizedBox(height: 24),
           const PhoneLinkExtrasSection(),
