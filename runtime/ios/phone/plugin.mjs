@@ -119,6 +119,20 @@ async function sshConfigCall(args) {
   }
 }
 
+/// iOS 的 schema 是把 Android 目录整份搬过来的，里面带着只有 Android 才有的
+/// ackground（后台屏）。iOS 没有这条通道，而且 actions.mjs 见到它会直接抛
+/// ERR_IOS_PHONE_UNSUPPORTED——请求连原生层都到不了。
+///
+/// 光在描述里写「不要使用 background:true」不够：模型照样会传，于是每一次读屏
+/// 都在这里被拒，而原生日志里连一条截图记录都看不到，排查时会误以为是通道坏了。
+/// 直接把字段从 schema 里拿掉，模型就没有这个选项可选。
+function iosInputSchema(schema) {
+  const properties = schema?.properties;
+  if (!properties || !('background' in properties)) return schema;
+  const { background, ...rest } = properties;
+  return { ...schema, properties: rest };
+}
+
 export async function apply(ctx, config) {
   if (!isAbsolute(config.directory) || !/^[a-f0-9-]{36}$/.test(config.runId)) throw new Error('Invalid iOS phone endpoint directory/generation');
   const directory = await stat(config.directory);
@@ -153,7 +167,7 @@ export async function apply(ctx, config) {
     for (const tool of catalog) {
       disposers.push(ctx.tools.register(createMcpToolDefinition(ctx, {
         name: `mcp__phone__${tool.name}`, rawName: tool.name,
-        description: iosToolDescription(tool.name), inputSchema: tool.inputSchema,
+        description: iosToolDescription(tool.name), inputSchema: iosInputSchema(tool.inputSchema),
         call: (args, execution) => call(tool.name, args, execution),
       })));
     }
