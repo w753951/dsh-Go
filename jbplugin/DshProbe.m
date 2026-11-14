@@ -113,13 +113,15 @@ static void DshProbeInit(void) {
     DshLog([NSString stringWithFormat:@"loaded uid=%d pid=%d bundle=%@\n",
             getuid(), getpid(), [[NSBundle mainBundle] bundleIdentifier]]);
 
-    // 不要在 constructor 里做重活：SpringBoard 启动时它可能还没准备好。
-    // 延迟 5 秒，等 SpringBoard 起来再抓。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    // 必须投到后台队列，不能投 main queue。
+    // 实测：投 main queue 时 SpringBoard 启动期间主队列被占满，block 永远
+    // 排不上，日志里只有 "loaded" 一行、截图从不发生。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
       @autoreleasepool {
         DshLog(@"timer fired, grabbing\n");
-        DshGrabFullScreen();
+        BOOL ok = DshGrabFullScreen();
+        DshLog(ok ? @"grab done ok\n" : @"grab failed\n");
       }
     });
   }
