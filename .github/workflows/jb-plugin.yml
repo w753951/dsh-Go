@@ -34,22 +34,37 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install dpkg
+        run: |
+          # macOS 的 runner 自带 dpkg-deb（在 /usr/local/bin），没有就用 brew。
+          if ! command -v dpkg-deb >/dev/null 2>&1; then
+            brew install dpkg || true
+          fi
+          command -v dpkg-deb && dpkg-deb --version | head -1
+
       - name: Compile the tweak
         run: |
           set -euo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           echo "SDK: $SDK"
           mkdir -p build/DEBIAN build/Library/MobileSubstrate/DynamicLibraries
-          # 目标设备是 iOS 15.0 / arm64，未签名（TrollStore 安装不走代码签名校验，
-          # SpringBoard 加载 dylib 也不需要签名）。
-          xcrun --sdk iphoneos clang \\
-            -arch arm64 -miphoneos-version-min=15.0 \\
-            -isysroot "$SDK" \\
-            -dynamiclib -fobjc-arc -O2 \\
-            -framework Foundation -framework UIKit \\
-            -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \\
-            -o build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \\
+          # 目标设备是 iOS 15.0 / arm64。产物不签名：TrollStore 安装不走代码
+          # 签名校验，SpringBoard 加载 dylib 也不需要签名。
+          # 用 bash 数组拼参数，避免 YAML 里的反斜杠续行被当成字面量。
+          args=(
+            -arch arm64
+            -miphoneos-version-min=15.0
+            -isysroot "$SDK"
+            -dynamiclib
+            -fobjc-arc
+            -O2
+            -framework Foundation
+            -framework UIKit
+            -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
+            -o build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
             jbplugin/DshScreenshotService.m
+          )
+          xcrun --sdk iphoneos clang "${args[@]}"
           echo "=== 产物 ==="
           file build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
           lipo -info build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
@@ -59,17 +74,14 @@ jobs:
       - name: Package the deb
         run: |
           set -euo pipefail
-          cd build
-          # rootless 环境实际路径带 /var/jb 前缀，dpkg 由越狱环境安装时自动处理；
-          # 这里按 rootless 的布局打，安装后被放到 /var/jb/Library/...。
-          chmod -R 0755 Library
-          chmod 0644 Library/MobileSubstrate/DynamicLibraries/*.plist
-          chmod 0644 DEBIAN/control
-          SIZE=$(du -sk . | cut -f1)
-          echo "Installed-Size: $SIZE" >> DEBIAN/control
-          cd ..
-          dpkg-deb --build --root-owner-group build DshScreenService.deb || \\
-            dpkg-deb -b build DshScreenService.deb
+          chmod -R 0755 build/Library
+          chmod 0644 build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.plist
+          chmod 0644 build/DEBIAN/control
+          SIZE=$(du -sk build | cut -f1)
+          echo "Installed-Size: $SIZE" >> build/DEBIAN/control
+          # dpkg-deb 在 macOS 上来自 brew；没有就报清楚。
+          command -v dpkg-deb >/dev/null 2>&1 || { echo '::error title=dpkg::dpkg-deb missing'; exit 1; }
+          dpkg-deb --build --root-owner-group build DshScreenService.deb
           ls -la DshScreenService.deb
           dpkg-deb -I DshScreenService.deb
           dpkg-deb -c DshScreenService.deb
