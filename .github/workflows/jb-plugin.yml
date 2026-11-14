@@ -80,6 +80,21 @@ jobs:
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
           echo "=== 探针 ==="
           file build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib
+
+          # XinaA15 的 TweakInject 只认 FAT（通用二进制）形态的 dylib：
+          # 已生效的插件（Snapper3、ChoicySB 等）头都是 cafebabe，而 clang 直接
+          # 产出的是 thin（cffaedfe），这样的文件会被静默跳过——既不报错也不加载。
+          # 所以这里把 thin 重新包成 FAT：同一份 arm64 代码放进 fat 容器。
+          for name in DshScreenshotService DshProbe; do
+            thin="build/Library/MobileSubstrate/DynamicLibraries/$name.dylib"
+            fat="build/Library/MobileSubstrate/DynamicLibraries/$name.fat.dylib"
+            # create_fat 需要一个输入文件；用 -arch arm64 明确标注架构。
+            lipo -create -arch arm64 "$thin" -output "$fat"
+            mv "$fat" "$thin"
+            echo "--- $name 现在是 ---"
+            lipo -info "$thin"
+            od -A d -t x1 -N 4 "$thin"
+          done
           cp jbplugin/control build/DEBIAN/control
 
       - name: Package the deb
