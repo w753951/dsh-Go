@@ -152,6 +152,40 @@ jobs:
           [ -d "$src/vendor/magpie" ] && cp -R "$src/vendor/magpie" "$dest/vendor/" || true
           test -f "$dest/index.js" || { echo '::error title=plugin::the built-in plugin did not land'; exit 1; }
           echo "built-in plugin size: $(du -sh "$dest" | cut -f1)"
+
+      - name: Bundle dsh-purge
+        run: |
+          # dsh-purge：按它 package.json 的 files 清单打包。
+          # 这是**用户要求预装的第三方插件**，内容来自 mmparko/dsh-purge（上游
+          # YuJunZhiXue/dsh-purge 的镜像）。它自己声明依赖只有 peer 的
+          # @deepseek-ai/cordis，由宿主提供，所以整份复制即可，不需要 npm install。
+          app="app/build/ios/iphoneos/Runner.app"
+          dest="$app/builtin-plugins/dsh-purge"
+          mkdir -p "$dest"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/purge.tar.gz" \
+            https://codeload.github.com/mmparko/dsh-purge/tar.gz/refs/heads/master
+          mkdir -p "$RUNNER_TEMP/purge"
+          tar -xzf "$RUNNER_TEMP/purge.tar.gz" -C "$RUNNER_TEMP/purge" --strip-components=1
+          src="$RUNNER_TEMP/purge"
+          # files 清单：lib bin docs presets skills scripts client.js
+          # cordis.patch.yml screenshots.json README*.md LICENSE，另加 package.json。
+          # 注意 lib/default-prompt-inject.md 被上游 .npmignore 排除，这里照做。
+          for item in lib bin docs presets skills scripts; do
+            [ -d "$src/$item" ] && cp -R "$src/$item" "$dest/" || true
+          done
+          for item in client.js cordis.patch.yml screenshots.json package.json LICENSE \
+                      README.md README.zh-CN.md; do
+            [ -e "$src/$item" ] && cp "$src/$item" "$dest/" || true
+          done
+          rm -f "$dest/lib/default-prompt-inject.md"
+          # 主入口必须在，否则装上也启用不了。
+          test -f "$dest/lib/index.js" || {
+            echo '::error title=plugin::dsh-purge 的 lib/index.js 没落进包里'; exit 1; }
+          test -f "$dest/package.json" || {
+            echo '::error title=plugin::dsh-purge 的 package.json 没落进包里'; exit 1; }
+          echo "dsh-purge size: $(du -sh "$dest" | cut -f1)"
+          ls -la "$dest"
+
       - name: Sign with the HID entitlement
         run: |
           brew install ldid || true
