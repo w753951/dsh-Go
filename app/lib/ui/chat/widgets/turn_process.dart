@@ -155,6 +155,8 @@ class _TurnProcessState extends State<TurnProcess> with SingleTickerProviderStat
     final label = turnProcessLabel(widget.row);
     final rows = widget.row.rows;
     final open = _open;
+    // 展开时给全部；折叠时只给最后一条。
+    final visibleRows = open || rows.length <= 1 ? rows : rows.sublist(rows.length - 1);
 
     final header = Semantics(
       button: true,
@@ -182,11 +184,24 @@ class _TurnProcessState extends State<TurnProcess> with SingleTickerProviderStat
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (var i = 0; i < rows.length; i++)
+        // 折叠状态下只留最新一条，旧的收起来。
+        //
+        // 以前这里把整轮的思考与命令全部铺开，手机屏幕上一次会话就占掉好几屏，
+        // 用户要不停往回翻才能看到结论。折叠时只显示最新一步，想看历史就点
+        // 箭头展开——这样默认视图里「发生了什么」和「正在发生什么」都在一屏内。
+        if (!open && rows.length > 1)
           Padding(
-            key: ValueKey(rows[i].key),
-            padding: EdgeInsets.only(top: i == 0 ? 0 : widget.gapBefore(rows[i], rows[i - 1])),
-            child: widget.buildRow(rows[i]),
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text(
+              '更早的 ${rows.length - 1} 步已收起',
+              style: StreamRow.label(context),
+            ),
+          ),
+        for (var i = 0; i < visibleRows.length; i++)
+          Padding(
+            key: ValueKey(visibleRows[i].key),
+            padding: EdgeInsets.only(top: i == 0 ? 0 : widget.gapBefore(visibleRows[i], visibleRows[i - 1])),
+            child: widget.buildRow(visibleRows[i]),
           ),
       ],
     );
