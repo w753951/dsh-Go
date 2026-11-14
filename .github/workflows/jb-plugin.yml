@@ -34,13 +34,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install dpkg
+      - name: Install dpkg and ldid
         run: |
           # macOS 的 runner 自带 dpkg-deb（在 /usr/local/bin），没有就用 brew。
           if ! command -v dpkg-deb >/dev/null 2>&1; then
             brew install dpkg || true
           fi
           command -v dpkg-deb && dpkg-deb --version | head -1
+          # ldid 用来给 dshtool 签平台级授权。macOS runner 默认没有，
+          # 必须装：没有它 dshtool 就是未签名二进制，HID 事件会被内核丢弃，
+          # 于是「点击无反应」而日志里一切正常。
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid || brew install ProcursusTeam/ldid/ldid || true
+          fi
+          command -v ldid && ldid -v 2>&1 | head -1 || echo 'ldid still missing'
 
       - name: Compile the tweak
         run: |
@@ -124,13 +131,20 @@ jobs:
           file build/usr/bin/dshtool
           # root 下 exec 需要有效签名；用平台级授权签，读屏和 HID 才可用。
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
-          if [ -x "$LLDID" ]; then
-            "$LLDID" -Sjbplugin/ent-dshtool.plist build/usr/bin/dshtool
-            echo "已用 ldid 签名"
-            "$LLDID" -e build/usr/bin/dshtool | grep -c platform-application || true
-          else
-            echo "::warning title=ldid::ldid 不可用，dshtool 未签名"
+          if [ ! -x "$LLDID" ]; then
+            echo '::error title=ldid::ldid 缺失，dshtool 无法签名，HID 不会生效'
+            exit 1
           fi
+          "$LLDID" -Sjbplugin/ent-dshtool.plist build/usr/bin/dshtool
+          echo "已用 ldid 签名"
+          # 逐项断言授权真的进了二进制。以前这里只打了一行 warning 就继续，
+          # 结果产出一个未签名的工具，点击静默失效，排查了很久。
+          for key in platform-application com.apple.private.hid.client.event-dispatch \
+                     com.apple.private.security.no-sandbox; do
+            "$LLDID" -e build/usr/bin/dshtool | grep -q "$key" \
+              || { echo "::error title=entitlements::dshtool 缺 $key"; exit 1; }
+          done
+          echo "授权检查通过"
 
       - name: Package the deb
         run: |
