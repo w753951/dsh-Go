@@ -1,35 +1,32 @@
 //
-// dshtool —— 以 root 身份跑的命令行工具，负责读屏与点按。
+// dshtool —— 以 root 身份跑的读屏与点按工具。
 //
 // 为什么要有它：App 在自己的沙盒进程里，无论加什么 entitlement，
 // `UIGetScreenImage` 都只能拿到本进程的图层，截别的 App 就是纯黑。
-// 而 root 进程没有沙盒限制，能拿到整个屏幕；HID 注入同理。
-//
-// App 侧通过本机 sshd（127.0.0.1:22，root）调用这个工具，因此不需要
-// 任何 entitlements、不需要插件注入、也不需要 TrollStore 特殊打包。
+// root 进程没有这个限制。App 侧通过本机 sshd 调用它，
+// 因此不需要插件注入、不需要特殊打包。
 //
 // 用法：
-//   dshtool shot <path.png>      截整屏，写 PNG
-//   dshtool tap <x> <y> [ms]     在像素坐标点按
-//   dshtool swipe x1 y1 x2 y2 [ms]
-//   dshtool info                 输出屏幕尺寸、前台应用、是否锁定
-//   dshtool home                 按 Home
+//   dshtool shot <path.png>            截整屏，写 PNG
+//   dshtool tap <x> <y> [ms]           在屏幕像素坐标点按
+//   dshtool swipe x1 y1 x2 y2 [ms]     滑动
+//   dshtool info                       屏幕尺寸
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <mach/mach_time.h>
 
 #pragma mark - 抓屏
 
 static CGImageRef DshCapture(void) {
-  // UIGetScreenImage 是唯一在 root 下能拿到整屏的老接口；在沙盒 App 里
-  // 它只返回自己的图层，这就是之前一直截到纯黑的原因。
   typedef CGImageRef (*GetScreenFn)(void);
   GetScreenFn getScreen = (GetScreenFn)dlsym(RTLD_DEFAULT, "UIGetScreenImage");
   if (!getScreen) {
-    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
+    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit",
+                         RTLD_NOW | RTLD_LOCAL);
     if (uikit) getScreen = (GetScreenFn)dlsym(uikit, "UIGetScreenImage");
   }
   if (!getScreen) return NULL;
@@ -58,7 +55,8 @@ static BOOL DshIsBlank(CGImageRef image) {
   for (size_t i = 0; i < w * h; i++) {
     uint8_t r = pixels[i * 4], g = pixels[i * 4 + 1], b = pixels[i * 4 + 2];
     BOOL nearBlack = r < 12 && g < 12 && b < 12;
-    BOOL same = abs((int)r - (int)r0) < 6 && abs((int)g - (int)g0) < 6 && abs((int)b - (int)b0) < 6;
+    BOOL same = abs((int)r - (int)r0) < 6 && abs((int)g - (int)g0) < 6 &&
+                abs((int)b - (int)b0) < 6;
     if (nearBlack || same) uniform++;
   }
   free(pixels);
@@ -67,105 +65,102 @@ static BOOL DshIsBlank(CGImageRef image) {
 
 #pragma mark - HID 注入
 
-static CFTypeRef gHidClient = NULL;
+// 签名照抄 App 里已经能编译过的那份（IOSJailboneDevice.Symbols）：
+//   IOHIDEventCreateDigitizerEvent(alloc, ts, type, subtype, ...)
+// 字段码用 0x0C（x）与 0x0D（y），与 Swift 实现一致。
+typedef CFTypeRef (*CreateDigitizerFn)(CFAllocatorRef, uint64_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t,
+    double, double, double, double, uint32_t, uint32_t);
+typedef void (*SetFloatFn)(CFTypeRef, uint32_t, double);
+typedef CFTypeRef (*SystemCreateFn)(CFAllocatorRef);
+typedef void (*DispatchFn)(CFTypeRef, CFTypeRef);
 
-static CFTypeRef DshHidClient(void) {
-  if (gHidClient) return gHidClient;
-  void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-  if (!iokit) return NULL;
-  typedef CFTypeRef (*CreateFn)(CFAllocatorRef);
-  typedef void (*SetPropFn)(CFTypeRef, CFStringRef, CFTypeRef);
-  CreateFn create = (CreateFn)dlsym(iokit, "IOHIDEventSystemClientCreate");
-  SetPropFn setProp = (SetPropFn)dlsym(iokit, "IOHIDEventSystemClientSetProperty");
-  if (!create || !setProp) return NULL;
-  gHidClient = create(kCFAllocatorDefault);
-  if (!gHidClient) return NULL;
-  // 允许监听所有设备的事件流，这是注入能真正送进系统的关键。
-  setProp(gHidClient, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
-  return gHidClient;
+static CreateDigitizerFn gCreate = NULL;
+static SetFloatFn gSetFloat = NULL;
+static SystemCreateFn gSystemCreate = NULL;
+static DispatchFn gDispatch = NULL;
+static CFTypeRef gClient = NULL;
+
+static BOOL DshHidReady(void) {
+  static BOOL loaded = NO;
+  static BOOL ok = NO;
+  if (loaded) return ok;
+  loaded = YES;
+  void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",
+                       RTLD_NOW | RTLD_LOCAL);
+  if (!iokit) return NO;
+  gCreate = (CreateDigitizerFn)dlsym(iokit, "IOHIDEventCreateDigitizerEvent");
+  gSetFloat = (SetFloatFn)dlsym(iokit, "IOHIDEventSetFloatValue");
+  gSystemCreate = (SystemCreateFn)dlsym(iokit, "IOHIDEventSystemClientCreate");
+  gDispatch = (DispatchFn)dlsym(iokit, "IOHIDEventSystemClientDispatchEvent");
+  ok = gCreate && gSystemCreate && gDispatch;
+  return ok;
 }
 
-static BOOL DshDispatchDigitizer(CGFloat x, CGFloat y, BOOL touched) {
-  void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-  if (!iokit) return NO;
-  typedef CFTypeRef (*CreateDigitizerFn)(CFAllocatorRef, IOHIDEventType, uint64_t, uint32_t,
-      uint32_t, IOHIDEventOptionBits, double, double, double, double, double, double, double,
-      double, double, double, double, uint32_t, uint32_t, uint32_t, uint32_t);
-  typedef void (*SetIntegerFn)(CFTypeRef, IOHIDEventField, CFIndex);
-  typedef void (*AppendFn)(CFTypeRef, CFTypeRef);
-  typedef void (*DispatchFn)(CFTypeRef, CFTypeRef);
-  CreateDigitizerFn create = (CreateDigitizerFn)dlsym(iokit, "IOHIDEventCreateDigitizerEvent");
-  SetIntegerFn setInt = (SetIntegerFn)dlsym(iokit, "IOHIDEventSetIntegerValue");
-  AppendFn append = (AppendFn)dlsym(iokit, "IOHIDEventAppendEvent");
-  DispatchFn dispatch = (DispatchFn)dlsym(iokit, "IOHIDEventSystemClientDispatchEvent");
-  if (!create || !dispatch) return NO;
+static CFTypeRef DshHidClient(void) {
+  if (gClient) return gClient;
+  if (!DshHidReady()) return NULL;
+  gClient = gSystemCreate(kCFAllocatorDefault);
+  if (!gClient) return NULL;
+  // 允许向系统事件流派发，这是注入真正生效的前提。
+  typedef void (*SetPropFn)(CFTypeRef, CFStringRef, CFTypeRef);
+  void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",
+                       RTLD_NOW | RTLD_LOCAL);
+  if (iokit) {
+    SetPropFn setProp = (SetPropFn)dlsym(iokit, "IOHIDEventSystemClientSetProperty");
+    if (setProp) setProp(gClient, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+  }
+  return gClient;
+}
+
+static BOOL DshDispatchTouch(CGFloat x, CGFloat y, BOOL touched) {
+  if (!DshHidReady()) return NO;
   CFTypeRef client = DshHidClient();
   if (!client) return NO;
-
-  CFTypeRef finger = create(kCFAllocatorDefault,
-      kIOHIDEventTypeDigitizer, 0, 0, 0, 0,
-      0, 0, 0, x / 1000.0, y / 1000.0, 1.0, 1.0, 0, 0, 0, 0,
-      0, 0, 0, 0);
-  if (!finger) return NO;
-  if (setInt) {
-    setInt(finger, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    setInt(finger, kIOHIDEventFieldDigitizerRange, 1);
+  CFTypeRef event = gCreate(kCFAllocatorDefault, mach_absolute_time(),
+                            2, 0, 0, 0, 0, 0, 0, touched ? 1 : 0,
+                            (double)x, (double)y, 0, 0, 0, 0);
+  if (!event) return NO;
+  if (gSetFloat) {
+    gSetFloat(event, 0x0C, (double)x);
+    gSetFloat(event, 0x0D, (double)y);
   }
-  CFTypeRef event = create(kCFAllocatorDefault,
-      kIOHIDEventTypeDigitizer, 0, 0, 0, 0,
-      0, 0, 0, x / 1000.0, y / 1000.0, 1.0, 1.0, 0, 0, 0, 0,
-      0, 0, 0, touched ? 1 : 0);
-  if (!event) { CFRelease(finger); return NO; }
-  if (setInt) {
-    setInt(event, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    setInt(event, kIOHIDEventFieldDigitizerRange, 1);
-  }
-  if (append) append(event, finger);
-  dispatch(client, event);
+  gDispatch(client, event);
   CFRelease(event);
-  CFRelease(finger);
   return YES;
 }
 
 static void DshSleepMs(int ms) {
-  usleep((useconds_t)ms * 1000);
+  if (ms > 0) usleep((useconds_t)ms * 1000);
 }
 
 static int DshTap(CGFloat x, CGFloat y, int durationMs) {
-  if (!DshDispatchDigitizer(x, y, YES)) {
-    fprintf(stderr, "ERR_HID\n");
+  if (!DshDispatchTouch(x, y, YES)) {
+    fprintf(stderr, "ERR_HID: 建不出 HID 事件（缺 IOKit 符号或授权）\n");
     return 2;
   }
   DshSleepMs(durationMs > 0 ? durationMs : 60);
-  DshDispatchDigitizer(x, y, NO);
+  DshDispatchTouch(x, y, NO);
   return 0;
 }
 
 static int DshSwipe(CGFloat x1, CGFloat y1, CGFloat x2, CGFloat y2, int durationMs) {
   int span = durationMs > 0 ? durationMs : 300;
   int steps = 14;
-  if (!DshDispatchDigitizer(x1, y1, YES)) {
+  if (!DshDispatchTouch(x1, y1, YES)) {
     fprintf(stderr, "ERR_HID\n");
     return 2;
   }
   for (int i = 1; i <= steps; i++) {
     CGFloat t = (CGFloat)i / (CGFloat)steps;
-    DshDispatchDigitizer(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, YES);
+    DshDispatchTouch(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, YES);
     DshSleepMs(span / steps);
   }
-  DshDispatchDigitizer(x2, y2, NO);
+  DshDispatchTouch(x2, y2, NO);
   return 0;
 }
 
 #pragma mark - 主入口
-
-static CGSize DshScreenSize(void) {
-  CGImageRef image = DshCapture();
-  if (!image) return CGSizeZero;
-  CGSize size = CGSizeMake(CGImageGetWidth(image), CGImageGetHeight(image));
-  CGImageRelease(image);
-  return size;
-}
 
 static int DshShot(const char *path) {
   CGImageRef image = DshCapture();
@@ -174,7 +169,8 @@ static int DshShot(const char *path) {
     return 1;
   }
   BOOL blank = DshIsBlank(image);
-  int width = (int)CGImageGetWidth(image), height = (int)CGImageGetHeight(image);
+  int width = (int)CGImageGetWidth(image);
+  int height = (int)CGImageGetHeight(image);
   UIImage *wrapped = [UIImage imageWithCGImage:image];
   NSData *png = UIImagePNGRepresentation(wrapped);
   CGImageRelease(image);
@@ -213,8 +209,14 @@ int main(int argc, char *argv[]) {
                       argc > 6 ? atoi(argv[6]) : 300);
     }
     if ([cmd isEqualToString:@"info"]) {
-      CGSize size = DshScreenSize();
-      printf("uid=%d size=%.0fx%.0f\n", getuid(), size.width, size.height);
+      CGImageRef image = DshCapture();
+      if (image) {
+        printf("uid=%d size=%zux%zu\n", getuid(),
+               CGImageGetWidth(image), CGImageGetHeight(image));
+        CGImageRelease(image);
+      } else {
+        printf("uid=%d size=unknown\n", getuid());
+      }
       return 0;
     }
     fprintf(stderr, "未知命令 %s\n", argv[1]);
