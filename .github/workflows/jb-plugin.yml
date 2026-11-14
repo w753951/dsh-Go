@@ -146,25 +146,52 @@ jobs:
           done
           echo "授权检查通过"
 
-      - name: Package the deb
+      - name: Package the debs
         run: |
           set -euo pipefail
-          chmod -R 0755 build/Library
-          chmod 0755 build/usr/bin/dshtool
-          chmod 0644 build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.plist
-          chmod 0644 build/DEBIAN/control
-          SIZE=$(du -sk build | cut -f1)
-          echo "Installed-Size: $SIZE" >> build/DEBIAN/control
-          # dpkg-deb 在 macOS 上来自 brew；没有就报清楚。
+          # 两个包分开打。
+          #
+          # 以前只有一个包，里面既有 dylib 又有 dshtool。装到手机上时 dpkg 先建
+          # ./Library/MobileSubstrate 目录，而 /var/jb 下这一层是只读的，于是整个
+          # 安装失败——连能装的 dshtool 也一起装不进去，表现为「工具还是旧版本」。
+          # 拆开之后，纯工具那个包不碰只读路径，每次都能装上。
           command -v dpkg-deb >/dev/null 2>&1 || { echo '::error title=dpkg::dpkg-deb missing'; exit 1; }
-          dpkg-deb --build --root-owner-group build DshScreenService.deb
-          ls -la DshScreenService.deb
-          dpkg-deb -I DshScreenService.deb
-          dpkg-deb -c DshScreenService.deb
+
+          # 1) 工具包：只有 /usr/bin/dshtool
+          rm -rf pkg-tool
+          mkdir -p pkg-tool/DEBIAN pkg-tool/usr/bin
+          cp build/usr/bin/dshtool pkg-tool/usr/bin/dshtool
+          chmod 0755 pkg-tool/usr/bin/dshtool
+          cat > pkg-tool/DEBIAN/control <<'CTLEOF'
+Package: com.dshgo.dshtool
+Name: DSH Go Screen Tool
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 读屏与点按的命令行工具。由本机 sshd 以 root 调用。
+Maintainer: dsh-go
+Section: Utilities
+Installed-Size: 128
+CTLEOF
+          dpkg-deb --build --root-owner-group pkg-tool DshTool.deb
+          echo "=== DshTool.deb ==="
+          dpkg-deb -c DshTool.deb
+
+          # 2) 插件包：只有 dylib 与 plist
+          rm -rf pkg-tweak
+          mkdir -p pkg-tweak/DEBIAN pkg-tweak/Library/MobileSubstrate/DynamicLibraries
+          cp build/Library/MobileSubstrate/DynamicLibraries/* pkg-tweak/Library/MobileSubstrate/DynamicLibraries/
+          chmod 0755 pkg-tweak/Library/MobileSubstrate/DynamicLibraries/*.dylib
+          chmod 0644 pkg-tweak/Library/MobileSubstrate/DynamicLibraries/*.plist
+          cp build/DEBIAN/control pkg-tweak/DEBIAN/control
+          dpkg-deb --build --root-owner-group pkg-tweak DshTweak.deb
+          echo "=== DshTweak.deb ==="
+          dpkg-deb -c DshTweak.deb
 
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: jb-screen-deb
-          path: DshScreenService.deb
+          path: |
+            DshTool.deb
+            DshTweak.deb
           if-no-files-found: error
