@@ -139,17 +139,23 @@ final class IOSPhoneRunner {
       && link.generation == settingsGeneration && IOSPhoneControl.shared.enabled
       && !IOSPhoneControl.shared.isPaused
       && request.expiresAt > Date().timeIntervalSince1970 * 1000 }
-    guard live() else { return .failure(IOSPhoneSelfRunnerError.cancelled.message) }
+    IOSPhoneCoreDevice.trace("run method=\(request.action.kind) live=\(live())")
+    guard live() else {
+      IOSPhoneCoreDevice.trace("reject: not-live")
+      return .failure(IOSPhoneSelfRunnerError.cancelled.message)
+    }
     guard !link.isPreparing else {
       return .failure("连接设置正在处理另一项准备，请等待完成后重新发起；不是增强开关未开启。")
     }
     // 越狱通道自带抓屏和 HID 注入，既不需要「手机连接」（CoreDevice 配对），
     // 也不需要「XCTest 增强」。这两个开关在越狱设备上不再是门槛。
     let jailbreak = IOSJailbreakDevice.available()
+    IOSPhoneCoreDevice.trace("gate jailbreak=\(jailbreak) linkEnabled=\(link.enabled)")
     guard jailbreak || link.enabled || link.xctestEnabled else {
       return .failure("手机连接和 XCTest 增强均未启用。请由用户在设置中选择；已保存配对不等于授权操控。")
     }
     // 画中画已移除：越狱机的真后台插件保证进程活着，这里只确认设备解锁。
+    IOSPhoneCoreDevice.trace("gate unlocked=\(IOSPhoneCoreDevice.backgroundKeepAliveAvailable)")
     guard IOSPhoneCoreDevice.backgroundKeepAliveAvailable else {
       return .failure("手机已锁定，没有读取或派发动作；请解锁后重新发起。")
     }
@@ -178,6 +184,7 @@ final class IOSPhoneRunner {
       sessionID: request.owner.sessionId))
       + "\n\n路线由你的设置和可用性决定；XCTest 只在已启用时使用。已经派发或结果不明时不切换重试。"
       + returnDescription
+    IOSPhoneCoreDevice.trace("before-consent")
     guard await consent.prepareForeground(request, current: live), live(),
       await IOSPhoneClipboard.shared.resolvePending(request, actions: actions, current: live), live() else {
       retireConnection(ownerID: ownerID, invocationID: invocationID)
@@ -187,6 +194,7 @@ final class IOSPhoneRunner {
     guard await consent.approve(request, detail: description,
       needsTarget: returnTarget == nil && (plan.needsTarget || plan.method == .open), preview: preview, current: live),
       live(), await authorize(), live(), consent.isGranted else {
+      IOSPhoneCoreDevice.trace("reject: consent granted=\(consent.isGranted)")
       retireConnection(ownerID: ownerID, invocationID: invocationID)
       return .failure("本次调用没有取得仍有效的逐次批准，没有派发手机动作。不要自动重试。")
     }
@@ -218,7 +226,9 @@ final class IOSPhoneRunner {
         if lastRoute != .coredevice { coreActions.invalidate(); lastXCTestScreen = nil }
         lastRoute = .coredevice; lastEndpoint = nil
         progress(.executing)
+        IOSPhoneCoreDevice.trace("dispatch method=\(String(describing: plan.method))")
         let outcome = await coreActions.run(plan, request: request, ownerID: ownerID, consent: consent, current: live)
+        IOSPhoneCoreDevice.trace("dispatched ok=\(!outcome.isError)")
         if !outcome.isError, plan.method == .open { targetApplication = coreActions.lastOpenedApplication }
         return outcome
       case .failure(let failure):
