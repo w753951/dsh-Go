@@ -110,8 +110,28 @@ jobs:
           }
 
           # DshProbe 只链接 Foundation（全动态加载 UIKit/CG），可以安全注入。
+          # 关键：plist 必须转成二进制。
+          #
+          # XinaA15 的 TweakInject 只认二进制 plist（bplist00）。XML 格式会被
+          # 静默跳过——不报错、不加载，表现就是"插件装了却毫无反应"。
+          #
+          # 这一条卡了很久：之前唯一一次成功注入，是我手动把 plist 转二进制
+          # 再 scp 上去的；而所有通过 deb 安装的尝试都失败，因为 workflow
+          # 直接 cp 了 XML 源文件。
+          plist_bin() {
+            local src="$1" dst="$2"
+            cp "$src" "$dst"
+            plutil -convert binary1 "$dst" || {
+              echo "::error title=plist::$dst 转二进制失败"
+              exit 1
+            }
+            echo "--- $dst ---"
+            head -c 8 "$dst" | od -c | head -1
+          }
+
           build_tweak DshProbe2.dylib jbplugin/DshProbe.m -O1
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe2.plist
+          plist_bin jbplugin/DshScreenshotService.plist \
+            build/Library/MobileSubstrate/DynamicLibraries/DshProbe2.plist
 
           # DshScreenshotService 仍然静态链接 UIKit，实测会让 SpringBoard 崩溃
           # 进安全模式。保留源码和构建但不打包，等它改成全动态再说。
@@ -121,7 +141,8 @@ jobs:
             echo "跳过 DshScreenshotService（静态链接 UIKit 会 PAC 崩）"
           fi
 
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
+          plist_bin jbplugin/DshScreenshotService.plist \
+            build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
 
           cp jbplugin/control build/DEBIAN/control
 
