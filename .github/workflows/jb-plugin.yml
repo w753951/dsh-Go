@@ -110,8 +110,8 @@ jobs:
           }
 
           # DshProbe 只链接 Foundation（全动态加载 UIKit/CG），可以安全注入。
-          build_tweak DshProbe.dylib jbplugin/DshProbe.m -O1
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
+          build_tweak DshProbe2.dylib jbplugin/DshProbe.m -O1
+          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe2.plist
 
           # DshScreenshotService 仍然静态链接 UIKit，实测会让 SpringBoard 崩溃
           # 进安全模式。保留源码和构建但不打包，等它改成全动态再说。
