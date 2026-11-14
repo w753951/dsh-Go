@@ -103,10 +103,40 @@ jobs:
           done
           cp jbplugin/control build/DEBIAN/control
 
+          # dshtool：root 下的读屏与点按命令行工具。
+          # 它不依赖插件注入，App 通过本机 sshd 调用它，因此绕开了
+          # 「沙盒进程看不到别的 App」这个根本限制。
+          mkdir -p build/usr/bin
+          tool_args=(
+            -arch arm64
+            -miphoneos-version-min=15.0
+            -isysroot "$SDK"
+            -fobjc-arc
+            -O2
+            -framework Foundation
+            -framework UIKit
+            -framework CoreGraphics
+            -o build/usr/bin/dshtool
+            jbplugin/dshtool.m
+          )
+          xcrun --sdk iphoneos clang "${tool_args[@]}"
+          echo "=== dshtool ==="
+          file build/usr/bin/dshtool
+          # root 下 exec 需要有效签名；用平台级授权签，读屏和 HID 才可用。
+          LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+          if [ -x "$LLDID" ]; then
+            "$LLDID" -Sjbplugin/ent-dshtool.plist build/usr/bin/dshtool
+            echo "已用 ldid 签名"
+            "$LLDID" -e build/usr/bin/dshtool | grep -c platform-application || true
+          else
+            echo "::warning title=ldid::ldid 不可用，dshtool 未签名"
+          fi
+
       - name: Package the deb
         run: |
           set -euo pipefail
           chmod -R 0755 build/Library
+          chmod 0755 build/usr/bin/dshtool
           chmod 0644 build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.plist
           chmod 0644 build/DEBIAN/control
           SIZE=$(du -sk build | cut -f1)
