@@ -58,56 +58,43 @@ jobs:
           # 目标设备是 iOS 15.0 / arm64。产物不签名：TrollStore 安装不走代码
           # 签名校验，SpringBoard 加载 dylib 也不需要签名。
           # 用 bash 数组拼参数，避免 YAML 里的反斜杠续行被当成字面量。
-          args=(
-            -arch arm64
-            -miphoneos-version-min=15.0
-            -isysroot "$SDK"
-            -dynamiclib
-            -fobjc-arc
-            -O2
-            -framework Foundation
-            -framework UIKit
-            -framework CoreGraphics
-            -o build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
-            jbplugin/DshScreenshotService.m
-          )
-          xcrun --sdk iphoneos clang "${args[@]}"
-          echo "=== 产物 ==="
-          file build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
-          lipo -info build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/
-          # 探针：极少代码，只写一行日志。用来单独验证注入机制是否接受我们的 dylib。
-          # 同样用数组，不写反斜杠续行：YAML 里续行容易被吃掉或变成字面量。
-          probe_args=(
-            -arch arm64
-            -miphoneos-version-min=15.0
-            -isysroot "$SDK"
-            -dynamiclib
-            -fobjc-arc
-            -O1
-            -framework Foundation
-            -o build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib
-            jbplugin/DshProbe.m
-          )
-          xcrun --sdk iphoneos clang "${probe_args[@]}"
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
-          echo "=== 探针 ==="
-          file build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib
+          # 关键：SpringBoard 是 arm64e，XinaA15 的 TweakInject 只会加载
+          # **带 arm64e 切片**的 dylib。只编 arm64 的话，文件在 FAT 容器里也一样
+          # 被静默跳过——既不报错也不加载，这就是之前 DshProbe 一行日志都写不
+          # 出来的原因。能正常工作的第三方插件（SquidGesture / Snapper3 /
+          # BarXSBoard）全是 ['arm64', 'arm64e'] 双切片。
+          #
+          # 所以每个 tweak 编两份再 lipo 合并：arm64 给普通 App，arm64e 给
+          # SpringBoard 这类受指针认证保护的进程。
+          build_tweak() {
+            local name="$1" src="$2" opt="$3"
+            local out="build/Library/MobileSubstrate/DynamicLibraries/$name"
+            for arch in arm64 arm64e; do
+              echo "--- 编译 $name ($arch) ---"
+              xcrun --sdk iphoneos clang \
+                -arch "$arch" \
+                -miphoneos-version-min=15.0 \
+                -isysroot "$SDK" \
+                -dynamiclib \
+                -fobjc-arc \
+                "$opt" \
+                -framework Foundation \
+                -framework UIKit \
+                -framework CoreGraphics \
+                -o "${out}.${arch}" "$src"
+            done
+            lipo -create -arch arm64 "${out}.arm64" -arch arm64e "${out}.arm64e" -output "$out"
+            rm -f "${out}.arm64" "${out}.arm64e"
+            echo "=== $name 最终 ==="
+            lipo -info "$out"
+            od -A d -t x1 -N 4 "$out"
+          }
 
-          # XinaA15 的 TweakInject 只认 FAT（通用二进制）形态的 dylib：
-          # 已生效的插件（Snapper3、ChoicySB 等）头都是 cafebabe，而 clang 直接
-          # 产出的是 thin（cffaedfe），这样的文件会被静默跳过——既不报错也不加载。
-          # 所以这里把 thin 重新包成 FAT：同一份 arm64 代码放进 fat 容器。
-          for name in DshScreenshotService DshProbe; do
-            thin="build/Library/MobileSubstrate/DynamicLibraries/$name.dylib"
-            fat="build/Library/MobileSubstrate/DynamicLibraries/$name.fat.dylib"
-            # create_fat 需要一个输入文件；用 -arch arm64 明确标注架构。
-            lipo -create -arch arm64 "$thin" -output "$fat"
-            mv "$fat" "$thin"
-            echo "--- $name 现在是 ---"
-            lipo -info "$thin"
-            od -A d -t x1 -N 4 "$thin"
-          done
+          build_tweak DshScreenshotService.dylib jbplugin/DshScreenshotService.m -O2
+          build_tweak DshProbe.dylib jbplugin/DshProbe.m -O1
+          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/
+          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
+
           cp jbplugin/control build/DEBIAN/control
 
           # dshtool：root 下的读屏与点按命令行工具。
@@ -157,11 +144,15 @@ jobs:
           # 拆开之后，纯工具那个包不碰只读路径，每次都能装上。
           command -v dpkg-deb >/dev/null 2>&1 || { echo '::error title=dpkg::dpkg-deb missing'; exit 1; }
 
-          # 1) 工具包：只有 /usr/bin/dshtool
+          # 1) 工具包：只有 var/jb/usr/bin/dshtool
+          #
+          # 路径必须是 var/jb/usr/bin，不是 usr/bin。iOS 15 rootless 上 /usr/bin
+          # 是只读的系统卷，dpkg 会报 "unable to create ... Read-only file system"
+          # 然后整体失败——之前工具一直装不上就是这个原因。
           rm -rf pkg-tool
-          mkdir -p pkg-tool/DEBIAN pkg-tool/usr/bin
-          cp build/usr/bin/dshtool pkg-tool/usr/bin/dshtool
-          chmod 0755 pkg-tool/usr/bin/dshtool
+          mkdir -p pkg-tool/DEBIAN pkg-tool/var/jb/usr/bin
+          cp build/usr/bin/dshtool pkg-tool/var/jb/usr/bin/dshtool
+          chmod 0755 pkg-tool/var/jb/usr/bin/dshtool
           # 用 printf 写 control：heredoc 的内容在 YAML 里必须缩进，缩进了又会把
           # 空格写进 control 文件，两头不讨好。printf 每行一个参数最干净。
           printf '%s\n' \
