@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import UIKit
+import Photos
 
 struct IOSPhoneCoreFailure: Error {
   let code: String
@@ -907,31 +908,57 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   ///
   /// App 在沙盒里调 `UIGetScreenImage` 只能拿到自己的图层，截出来是黑的；
   /// 越狱机上装的 NiceBarX 把「状态栏电池单击」绑到了「DSH截图」快捷指令，
-  /// 那条路在 SpringBoard 内部跑，能把**整屏**存进相册。所以这里退一步去读
-  /// 相册的最新文件——绕开沙盒，也绕开 HID。
+  /// 那条路在 SpringBoard 内部跑，能把**整屏**存进相册。
   ///
-  /// 只认 `maxAge` 秒内的文件：读屏要的是「当前屏幕」，拿一张几分钟前的旧图
+  /// 必须走 Photos 框架，不能直接读文件：`platform-application` 只放开私有
+  /// API，文件系统沙盒照样拦着 `/var/mobile/Media/DCIM`，`contentsOfDirectory`
+  /// 会直接失败。相册访问要 PHPhotoLibrary 授权。
+  ///
+  /// 只认 `maxAge` 秒内的照片：读屏要的是「当前屏幕」，拿一张几分钟前的旧图
   /// 当现状会让模型对着过期画面下判断。
   private func latestAlbumScreenshot(maxAge: TimeInterval = 120) -> UIImage? {
-    let fm = FileManager.default
-    let root = "/var/mobile/Media/DCIM"
-    guard let dirs = try? fm.contentsOfDirectory(atPath: root) else { return nil }
+    var status = PHPhotoLibrary.authorizationStatus()
+    if status == .notDetermined {
+      // 首次需要授权。这里同步等一下，避免读屏在弹窗还没点的时候直接失败。
+      let sema = DispatchSemaphore(value: 0)
+      PHPhotoLibrary.requestAuthorization { _ in sema.signal() }
+      _ = sema.wait(timeout: .now() + 8)
+      status = PHPhotoLibrary.authorizationStatus()
+    }
+    guard status == .authorized || status == .limited else { return nil }
+
+    let opts = PHFetchOptions()
+    opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    opts.fetchLimit = 8
+    let assets = PHAsset.fetchAssets(with: .image, options: opts)
     let cutoff = Date().addingTimeInterval(-maxAge)
-    var best: (path: String, date: Date)?
-    for dir in dirs {
-      let sub = (root as NSString).appendingPathComponent(dir)
-      guard let files = try? fm.contentsOfDirectory(atPath: sub) else { continue }
-      for name in files {
-        let lower = name.lowercased()
-        guard lower.hasSuffix(".png") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") else { continue }
-        let full = (sub as NSString).appendingPathComponent(name)
-        guard let attrs = try? fm.attributesOfItem(atPath: full),
-          let mtime = attrs[.modificationDate] as? Date, mtime > cutoff else { continue }
-        if best == nil || mtime > best!.date { best = (full, mtime) }
+    var target: PHAsset?
+    assets.enumerateObjects { asset, _, stop in
+      if let created = asset.creationDate, created > cutoff {
+        target = asset
+        stop.pointee = true
       }
     }
-    guard let hit = best else { return nil }
-    return UIImage(contentsOfFile: hit.path)
+    guard let asset = target else { return nil }
+
+    var image: UIImage?
+    let sema = DispatchSemaphore(value: 0)
+    let reqOpts = PHImageRequestOptions()
+    reqOpts.isSynchronous = true
+    reqOpts.deliveryMode = .highQualityFormat
+    reqOpts.resizeMode = .none
+    reqOpts.isNetworkAccessAllowed = false
+    PHImageManager.default().requestImage(
+      for: asset,
+      targetSize: PHImageManagerMaximumSize,
+      contentMode: .default,
+      options: reqOpts
+    ) { result, _ in
+      image = result
+      sema.signal()
+    }
+    _ = sema.wait(timeout: .now() + 10)
+    return image
   }
 
   private func capture() -> Outcome {
