@@ -58,41 +58,49 @@ jobs:
           # 目标设备是 iOS 15.0 / arm64。产物不签名：TrollStore 安装不走代码
           # 签名校验，SpringBoard 加载 dylib 也不需要签名。
           # 用 bash 数组拼参数，避免 YAML 里的反斜杠续行被当成字面量。
-          # 关键：SpringBoard 是 arm64e，XinaA15 的 TweakInject 只会加载
-          # **带 arm64e 切片**的 dylib。只编 arm64 的话，文件在 FAT 容器里也一样
-          # 被静默跳过——既不报错也不加载，这就是之前 DshProbe 一行日志都写不
-          # 出来的原因。能正常工作的第三方插件（SquidGesture / Snapper3 /
-          # BarXSBoard）全是 ['arm64', 'arm64e'] 双切片。
+          # 只编 arm64，然后 **ad-hoc 签名**。
           #
-          # 所以每个 tweak 编两份再 lipo 合并：arm64 给普通 App，arm64e 给
-          # SpringBoard 这类受指针认证保护的进程。
+          # 教训：不要编 arm64e。arm64e 代码带指针认证（PAC），未经正确签名的
+          # arm64e dylib 一加载就让 SpringBoard 崩溃，手机直接进安全模式——
+          # 这一步实测踩过，不要再试。
+          #
+          # 改用单 arm64 + ldid -S。第三方插件（能正常注入的那些）都带签名，
+          # 而我们之前一直是裸二进制。签名或许才是注入失败的真原因。
           build_tweak() {
             local name="$1" src="$2" opt="$3"
             local out="build/Library/MobileSubstrate/DynamicLibraries/$name"
-            for arch in arm64 arm64e; do
-              echo "--- 编译 $name ($arch) ---"
-              xcrun --sdk iphoneos clang \
-                -arch "$arch" \
-                -miphoneos-version-min=15.0 \
-                -isysroot "$SDK" \
-                -dynamiclib \
-                -fobjc-arc \
-                "$opt" \
-                -framework Foundation \
-                -framework UIKit \
-                -framework CoreGraphics \
-                -o "${out}.${arch}" "$src"
-            done
-            lipo -create -arch arm64 "${out}.arm64" -arch arm64e "${out}.arm64e" -output "$out"
-            rm -f "${out}.arm64" "${out}.arm64e"
-            echo "=== $name 最终 ==="
+            xcrun --sdk iphoneos clang \
+              -arch arm64 \
+              -miphoneos-version-min=15.0 \
+              -isysroot "$SDK" \
+              -dynamiclib \
+              -fobjc-arc \
+              "$opt" \
+              -framework Foundation \
+              -framework UIKit \
+              -framework CoreGraphics \
+              -o "$out" "$src"
+            lipo -create -arch arm64 "$out" -output "${out}.fat"
+            mv "${out}.fat" "$out"
+            echo "=== $name 架构 ==="
             lipo -info "$out"
-            od -A d -t x1 -N 4 "$out"
           }
 
           build_tweak DshScreenshotService.dylib jbplugin/DshScreenshotService.m -O2
           build_tweak DshProbe.dylib jbplugin/DshProbe.m -O1
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/
+          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
+
+          # 给两个 dylib 做 ad-hoc 签名。ldid -S 不带描述文件即可。
+          LLDID_T="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+          for name in DshScreenshotService DshProbe; do
+            d="build/Library/MobileSubstrate/DynamicLibraries/$name.dylib"
+            if "$LLDID_T" -S "$d" 2>/dev/null; then
+              echo "$name 已 ad-hoc 签名"
+            else
+              echo "::warning title=ldid::$name 签名失败"
+            fi
+          done
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
 
           cp jbplugin/control build/DEBIAN/control
