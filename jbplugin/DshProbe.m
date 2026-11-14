@@ -68,13 +68,13 @@ static BOOL StepApplication(NSString **detail) {
 
   Class appCls = NSClassFromString(@"UIApplication");
   if (!appCls) { *detail = @"UIApplication 类不存在"; return NO; }
-  DshLog(@"  UIApplication class=%p\n", (void *)appCls);
+  DshLog(@"  UIApplication class=%p\n", (__bridge void *)appCls);
 
   id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
-  DshLog(@"  sharedApplication=%p\n", (void *)app);
+  DshLog(@"  sharedApplication=%p\n", (__bridge void *)app);
   if (!app) { *detail = @"sharedApplication 为 nil"; return NO; }
 
-  *detail = [NSString stringWithFormat:@"app=%p", (void *)app];
+  *detail = [NSString stringWithFormat:@"app=%p", (__bridge void *)app];
   return YES;
 }
 
@@ -88,12 +88,12 @@ static BOOL StepWindow(NSString **detail) {
   // SpringBoard 里 keyWindow 常常是 nil，改取 windows 里最靠前的。
   id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
   NSUInteger count = windows ? ((NSUInteger (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count")) : 0;
-  DshLog(@"  windows=%p count=%lu\n", (void *)windows, (unsigned long)count);
+  DshLog(@"  windows=%p count=%lu\n", (__bridge void *)windows, (unsigned long)count);
   if (count == 0) { *detail = @"没有窗口"; return NO; }
 
   id window = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
       sel_registerName("objectAtIndex:"), count - 1);
-  DshLog(@"  window=%p class=%@\n", (void *)window,
+  DshLog(@"  window=%p class=%@\n", (__bridge void *)window,
          ((id (*)(id, SEL))objc_msgSend)(window, sel_registerName("class")));
 
   CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(window, sel_registerName("bounds"));
@@ -145,8 +145,9 @@ static BOOL StepRender(NSString **detail) {
         sel_registerName("objectAtIndex:"), i);
     CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
     @try {
-      ((void (*)(id, SEL, CGRect, BOOL))objc_msgSend)(w,
-          sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
+      typedef void (*DrawHierFn)(id, SEL, CGRect, BOOL);
+      DrawHierFn drawHier = (DrawHierFn)(void *)objc_msgSend;
+      drawHier(w, sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
       DshLog(@"  窗口 %lu 已绘制\n", (unsigned long)i);
     } @catch (NSException *e) {
       DshLog(@"  窗口 %lu 绘制异常 %@\n", (unsigned long)i, e.name);
@@ -155,7 +156,7 @@ static BOOL StepRender(NSString **detail) {
 
   id image = getImage();
   end();
-  DshLog(@"  图像=%p\n", (void *)image);
+  DshLog(@"  图像=%p\n", (__bridge void *)image);
   if (!image) { *detail = @"渲染结果为 nil"; return NO; }
 
   // 转 PNG。UIImagePNGRepresentation 是 C 函数。
