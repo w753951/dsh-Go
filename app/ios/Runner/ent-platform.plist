@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.io.github.ccch1mneyyy.dshgo</string>
+	</array>
+	<!-- platform-application 让系统把这个 App 当成平台级二进制对待。
+	     只有它能让 UIGetScreenImage 返回「整个屏幕」而不是只有本 App 的图层；
+	     HID 授权负责点按与滑动；launchapplications 负责打开其它 App。 -->
+	<key>platform-application</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-dispatch</key>
+	<true/>
+	<key>com.apple.springboard.launchapplications</key>
+	<true/>
+</dict>
+</plist>
