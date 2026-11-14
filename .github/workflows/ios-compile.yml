@@ -156,24 +156,28 @@ jobs:
       - name: Bundle dsh-purge
         run: |
           # dsh-purge：按它 package.json 的 files 清单打包。
-          # 这是**用户要求预装的第三方插件**，内容来自 mmparko/dsh-purge（上游
-          # YuJunZhiXue/dsh-purge 的镜像）。它自己声明依赖只有 peer 的
-          # @deepseek-ai/cordis，由宿主提供，所以整份复制即可，不需要 npm install。
+          # 来源是 kingcharleslzy-ai/dsh-purge（社区维护版）。**不要用
+          # mmparko/dsh-purge**：那个版本会无条件往 prompt 里写 {{cwd}}，
+          # 而本机引擎只注册了 provider/model 两个变量，于是每一轮都报
+          # unknown prompt variable 直接失败。这个版本会先探测
+          # assembled.variables 里有没有 cwd，没有就退回静态文本。
+          # 依赖只有 peer 的 @deepseek-ai/cordis（由宿主提供），整份复制即可。
           app="app/build/ios/iphoneos/Runner.app"
           dest="$app/builtin-plugins/dsh-purge"
           mkdir -p "$dest"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/purge.tar.gz" \
-            https://codeload.github.com/mmparko/dsh-purge/tar.gz/refs/heads/master
+            https://codeload.github.com/kingcharleslzy-ai/dsh-purge/tar.gz/refs/heads/master
           mkdir -p "$RUNNER_TEMP/purge"
           tar -xzf "$RUNNER_TEMP/purge.tar.gz" -C "$RUNNER_TEMP/purge" --strip-components=1
           src="$RUNNER_TEMP/purge"
           # files 清单：lib bin docs presets skills scripts client.js
           # cordis.patch.yml screenshots.json README*.md LICENSE，另加 package.json。
           # 注意 lib/default-prompt-inject.md 被上游 .npmignore 排除，这里照做。
-          for item in lib bin docs presets skills scripts; do
+          for item in lib bin docs presets skills scripts locale packages market; do
             [ -d "$src/$item" ] && cp -R "$src/$item" "$dest/" || true
           done
           for item in client.js cordis.patch.yml screenshots.json package.json LICENSE \
+                      NOTICE.md CONTRIBUTORS.md AGENTS.md icon.png \
                       README.md README.zh-CN.md; do
             [ -e "$src/$item" ] && cp "$src/$item" "$dest/" || true
           done
