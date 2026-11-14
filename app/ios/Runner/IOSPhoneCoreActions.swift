@@ -124,18 +124,38 @@ final class IOSPhoneCoreActions {
         _ = try await send(["op": "prepareInput"], execution, current: live)
       }
       if plan.method == .open, let application {
-        let opened = try await send(["op": "launch", "bundleId": application], execution, current: live)
-        // 打开应用不再等「目标到前台」。
+        // 先走原生 launch；失败就退回越狱环境的 uiopen。
         //
-        // 以前这里 await waitForTarget 再截屏，两个问题叠加：真后台 tweak 下
-        // 真实前台可能长时间仍是 DSH Go，waitForTarget 会一直等到超时；就算
-        // 等到了，后面截屏失败也会把「已经启动成功」判成整个 open 失败——
-        // 于是「打开微信」这种最简单的动作也做不成。
+        // 原生的 launch 走 SBSLaunchApplicationWithIdentifier，在 XinaA15 上
+        // 常常直接返回 false（日志里 dispatched ok=false，且会触发系统的
+        // 「允许打开」确认框，用户没点就等于取消）。uiopen 是越狱自带的
+        // 工具，它直接调 SpringBoard 的启动接口，实测干净可用、不弹确认框。
         //
-        // 启动请求被系统接受就是成功。前台核实与截屏是附加信息，拿不到
-        // 也不该否定已经发生的事实。
+        // 以前这里 try 一次就完，失败即整次 open 失败——于是「打开微信」这种
+        // 最简单的动作永远做不成。现在两条路都试过再下结论。
+        var openedVia = "native"
+        var pidText = "未知"
+        var nativeFailure: String?
+        do {
+          let opened = try await send(["op": "launch", "bundleId": application], execution, current: live)
+          pidText = "\(opened.metadata.pid ?? 0)"
+        } catch {
+          nativeFailure = "\(error)"
+          // 回退：通过本机 sshd 用 uiopen 启动。
+          if let shell = try? await send(
+            ["op": "uiopen", "bundleId": application], execution, current: live),
+             shell.metadata.code == "OK" || shell.status == 0 {
+            openedVia = "uiopen"
+            pidText = "未知"
+          } else if let failure = nativeFailure {
+            throw IOSPhoneOperationError(
+              message: "两条启动通道都没成功：\(failure)。请确认目标应用已安装，或交还用户手动打开。")
+          }
+        }
         lastOpenedApplication = application
-        var summary = "启动请求已派发（pid=\(opened.metadata.pid ?? 0)）。"
+        var summary = openedVia == "native"
+          ? "启动请求已派发（pid=\(pidText)）。"
+          : "已通过越狱通道打开（uiopen）。"
         if let front = IOSPhoneCoreDevice.frontmostBundleID() {
           summary += front == application
             ? "目标应用已在前台。"
