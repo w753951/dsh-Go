@@ -149,6 +149,40 @@ static int DshTapDiag(CGFloat x, CGFloat y, int durationMs) {
   return 0;
 }
 
+
+// 单次长按：只用一个 client，按住期间持续发移动事件。
+//
+// 之前 tap 走的 DshTapDiag 会循环 5 种 client，等于连点 5 次、每次间隔 0.4 秒——
+// 系统把它看成多次点击，永远不构成「长按」。长按需要一次持续的触摸，
+// 而且中途要有移动事件让系统知道手指还在。
+static int DshHold(CGFloat x, CGFloat y, int durationMs) {
+  if (!DshLoadIOKit()) { printf("IOKit fail\n"); return 2; }
+  int hold = durationMs > 0 ? durationMs : 1200;
+  CFTypeRef client = gSystemCreate ? gSystemCreate(kCFAllocatorDefault) : NULL;
+  if (!client) { printf("client nil\n"); return 2; }
+  if (gSetProp) gSetProp(client, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+
+  CFTypeRef down = DshMakeEvent(x, y, YES);
+  if (!down) { printf("down nil\n"); CFRelease(client); return 2; }
+  gDispatch(client, down);
+  CFRelease(down);
+
+  // 按住期间每 60ms 发一次同位置移动事件，模拟手指停在那里。
+  int elapsed = 0;
+  while (elapsed < hold) {
+    usleep(60 * 1000);
+    elapsed += 60;
+    CFTypeRef move = DshMakeEvent(x, y, YES);
+    if (move) { gDispatch(client, move); CFRelease(move); }
+  }
+
+  CFTypeRef up = DshMakeEvent(x, y, NO);
+  if (up) { gDispatch(client, up); CFRelease(up); }
+  CFRelease(client);
+  printf("长按 %dms 完成 (%g,%g)\n", hold, (double)x, (double)y);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
@@ -190,6 +224,10 @@ int main(int argc, char *argv[]) {
     if ([cmd isEqualToString:@"tapdiag"]) {
       if (argc < 4) return 64;
       return DshTapDiag(atof(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 80);
+    }
+    if ([cmd isEqualToString:@"hold"]) {
+      if (argc < 4) return 64;
+      return DshHold(atof(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 1200);
     }
     if ([cmd isEqualToString:@"tap"]) {
       if (argc < 4) return 64;
