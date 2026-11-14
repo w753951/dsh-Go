@@ -83,6 +83,80 @@ function trimOutput(value) {
   return `${value.slice(0, SHELL_OUTPUT_BYTES)}\n…（输出被截断，共 ${value.length} 字符）`;
 }
 
+/// 用越狱自带的 uiopen 打开应用。
+///
+/// 为什么不走 Swift 那一侧：iOS 上 child_process 与 Process() 都被禁用
+/// （引擎直接报 ERR_OHOS_NO_SPAWN），原生层没法 fork。而 SSH 通道本来就
+/// 能跑命令——shell 工具就是这么做事的，复用它即可。
+///
+/// 为什么不走原来的 open：原生的 SBSLaunchApplicationWithIdentifier 在
+/// XinaA15 上常常返回 false，还会弹「允许打开」确认框，用户没点就等于取消。
+/// uiopen 直接调 SpringBoard 的启动接口，实测干净可用、不弹框。
+///
+/// 包名先做格式校验：这条命令要拼进 shell，不允许任何可疑字符。
+const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/;
+
+// 常见应用的名字 → 包名。模型有时直接给中文名。
+const APP_ALIASES = new Map([
+  ['微信', 'com.tencent.xin'], ['wechat', 'com.tencent.xin'],
+  ['qq', 'com.tencent.mqq'],
+  ['支付宝', 'com.alipay.iphoneclient'],
+  ['淘宝', 'com.taobao.taobao4iphone'],
+  ['设置', 'com.apple.Preferences'], ['settings', 'com.apple.Preferences'],
+  ['相机', 'com.apple.camera'], ['照片', 'com.apple.mobileslideshow'],
+  ['快手', 'com.kwai.gif'], ['抖音', 'com.ss.iphone.ugc.Aweme'],
+  ['b站', 'bili-universal'], ['哔哩哔哩', 'bili-universal'],
+  ['高德地图', 'com.autonavi.amap'],
+]);
+
+function resolveBundleID(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (BUNDLE_ID_PATTERN.test(raw)) return raw;
+  return APP_ALIASES.get(raw.toLowerCase()) || null;
+}
+
+async function openViaSsh(args, execution) {
+  const bundleId = resolveBundleID(args?.app ?? args?.bundleId ?? args?.bundle);
+  if (!bundleId) {
+    return shellText(
+      'ERR_IOS_PHONE_ARGUMENTS: 需要一个应用名或包名（例：微信 / com.tencent.xin）。', true);
+  }
+  const signal = execution?.signal;
+  if (signal?.aborted) return shellText('ERR_IOS_PHONE_CANCELLED: 调用已取消，没有执行。', true);
+
+  const config = await readShellConfig();
+  try {
+    const result = await sshExec({
+      ...config,
+      command: `/var/bin/uiopen --bundleid ${bundleId} 2>&1 || /var/jb/usr/bin/uiopen --bundleid ${bundleId} 2>&1`,
+      timeoutMs: 20_000,
+    });
+    if (result.code !== null && result.code !== 0) {
+      return shellText(
+        `ERR_IOS_PHONE_OPEN: uiopen 退出码 ${result.code}${result.stdout ? `；${result.stdout.slice(0, 200)}` : ''}`, true);
+    }
+    // uiopen 只负责把请求交给 SpringBoard，应用起来要一会儿。这里稍等再
+    // 看一眼进程，但**不**把「没确认到」当成失败——启动请求已经发出去了。
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    let running = false;
+    try {
+      const check = await sshExec({
+        ...config,
+        command: `ps -A -o comm 2>/dev/null | grep -c ${JSON.stringify(bundleId)} || true`,
+        timeoutMs: 8_000,
+      });
+      running = Number((check.stdout || '0').trim()) > 0;
+    } catch { /* 确认失败不影响结论 */ }
+    return shellText(
+      `已通过 uiopen 打开 ${bundleId}。${running ? '进程已在运行。' : '应用可能正在启动。'}`,
+      false);
+  } catch (error) {
+    const code = error instanceof SshError ? error.code : 'internal';
+    return shellText(`ERR_IOS_PHONE_OPEN(${code}): ${error.message}`, true);
+  }
+}
+
 async function shellCall(args, execution) {
   const command = typeof args?.command === 'string' ? args.command : '';
   if (!command.trim()) return shellText('ERR_IOS_PHONE_ARGUMENTS: command 不能为空。', true);
@@ -161,6 +235,10 @@ export async function apply(ctx, config) {
   const call = (tool, args, execution) => {
     if (tool === 'shell') return shellCall(args, execution);
     if (tool === 'ssh_config') return sshConfigCall(args);
+    // open 走 SSH 的 uiopen：原生那条路在 XinaA15 上会弹确认框并被判成取消。
+    if (tool === 'open' && (args?.app !== undefined || args?.bundleId !== undefined || args?.bundle !== undefined)) {
+      return openViaSsh(args, execution);
+    }
     return bridge.call(tool, args, execution);
   };
   try {
