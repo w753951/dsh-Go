@@ -293,6 +293,34 @@ static int DshSwipe(CGFloat x1, CGFloat y1, CGFloat x2, CGFloat y2, int duration
   return 0;
 }
 
+
+// 当前前台 App 的 bundle id。
+//
+// 有了它，「滑动到底有没有生效」「现在在哪个界面」都能自动判断，不用靠截图
+// 或让人盯着屏幕。SpringBoardServices 的这个入口在越狱环境直接可用。
+static int DshFrontmost(void) {
+  void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                     RTLD_NOW | RTLD_LOCAL);
+  if (!sbs) { printf("ERR no SpringBoardServices\n"); return 2; }
+  typedef CFStringRef (*FrontFn)(void);
+  FrontFn fn = (FrontFn)dlsym(sbs, "SBSCopyFrontmostApplicationDisplayIdentifier");
+  if (!fn) {
+    // 换一个常见符号名再试
+    fn = (FrontFn)dlsym(sbs, "SBFrontmostApplicationDisplayIdentifier");
+  }
+  if (!fn) { printf("ERR no symbol\n"); return 2; }
+  CFStringRef app = fn();
+  if (!app) { printf("com.apple.springboard\n"); return 0; }
+  char buf[512];
+  if (CFStringGetCString(app, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+    printf("%s\n", buf);
+  } else {
+    printf("ERR convert\n");
+  }
+  CFRelease(app);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
@@ -338,6 +366,9 @@ int main(int argc, char *argv[]) {
     if ([cmd isEqualToString:@"snapnotify"]) {
       if (argc < 3) return 64;
       return DshSnapNotify(argv[2]);
+    }
+    if ([cmd isEqualToString:@"front"]) {
+      return DshFrontmost();
     }
     if ([cmd isEqualToString:@"swipe"]) {
       if (argc < 6) {
