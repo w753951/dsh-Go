@@ -15,6 +15,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -38,9 +39,12 @@ static CGImageRef DshCaptureFullScreen(void) {
   // 退一步：私有类方法。
   Class screenClass = NSClassFromString(@"UIScreen");
   if ([screenClass respondsToSelector:NSSelectorFromString(@"mainScreen")]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id screen = [screenClass performSelector:NSSelectorFromString(@"mainScreen")];
     if ([screen respondsToSelector:NSSelectorFromString(@"_snapshotView")]) {
       UIView *view = [screen performSelector:NSSelectorFromString(@"_snapshotView")];
+#pragma clang diagnostic pop
       if ([view isKindOfClass:[UIView class]] && view.bounds.size.width > 0) {
         UIGraphicsImageRenderer *renderer =
             [[UIGraphicsImageRenderer alloc] initWithBounds:view.bounds];
