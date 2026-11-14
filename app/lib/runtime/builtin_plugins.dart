@@ -26,7 +26,10 @@ class BuiltinPlugins {
   BuiltinPlugins._();
 
   /// 内置在 app bundle 里、需要补进 profile 的插件目录名。
-  static const List<String> bundled = ['dsh-our-free-model'];
+  ///
+  /// 这些目录由 CI 在打包时放进 App 的 `builtin-plugins/`，首次启动时整份
+  /// 复制进 profile 的 node_modules 并登记到 package.json。
+  static const List<String> bundled = ['dsh-our-free-model', 'dsh-purge'];
 
   /// app bundle 里存放内置插件的位置（由 CI 复制进去）。
   static const String bundleFolder = 'builtin-plugins';
