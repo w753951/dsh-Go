@@ -891,7 +891,6 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     case "swipe": return swipe(values)
     case "key": return key(values)
     case "launch": return launch(values)
-    case "uiopen": return uiopen(values)
     case "prepareInput":
       // 上层在读屏/打开应用前先发这个，用来确认输入通道可用。
       // 越狱通道直接注入 HID，没有需要预热的输入服务，回执成功即可。
@@ -1205,50 +1204,6 @@ final class IOSJailbreakDevice: @unchecked Sendable {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_UNSUPPORTED"]), bytes: nil)
     }
     return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
-  }
-
-  /// 用越狱自带的 uiopen 启动应用。
-  ///
-  /// 原生的 SBSLaunchApplicationWithIdentifier 在 XinaA15 上常常直接返回
-  /// false，还会弹「允许打开」确认框——用户没点就等于取消。uiopen 直接调
-  /// SpringBoard 的启动接口，实测干净可用。
-  ///
-  /// 它需要 fork/exec，而本进程在沙盒里 exec 不了，所以这里用 posix_spawn
-  /// 走系统 path。拿不到就直接失败，由上层决定是否报错。
-  private func uiopen(_ values: [String: Any]) -> Outcome {
-    guard let bundleID = values["bundleId"] as? String, !bundleID.isEmpty,
-      bundleID.utf8.count <= 255,
-      // 只允许包名格式，避免把任意字符串拼进命令行。
-      bundleID.range(of: #"^[A-Za-z0-9][A-Za-z0-9.-]*$"#, options: .regularExpression) != nil else {
-      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
-    }
-    // 越狱环境里 uiopen 在这几个位置之一。
-    let candidates = ["/var/bin/uiopen", "/var/jb/usr/bin/uiopen", "/usr/bin/uiopen"]
-    guard let tool = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-      return Outcome(status: 1, metadata: Self.json([
-        "outcome": "notSent", "code": "ERR_PHONE_UIOPEN_MISSING",
-      ]), bytes: nil)
-    }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: tool)
-    process.arguments = ["--bundleid", bundleID]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-      try process.run()
-      process.waitUntilExit()
-    } catch {
-      return Outcome(status: 1, metadata: Self.json([
-        "outcome": "notSent", "code": "ERR_PHONE_UIOPEN_SPAWN",
-      ]), bytes: nil)
-    }
-    // uiopen 自己不等应用起来，退出码 0 只代表请求发出去了。
-    guard process.terminationStatus == 0 else {
-      return Outcome(status: 1, metadata: Self.json([
-        "outcome": "notSent", "code": "ERR_PHONE_UIOPEN_EXIT",
-      ]), bytes: nil)
-    }
-    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched", "code": "OK"]), bytes: nil)
   }
 
   private func launch(_ values: [String: Any]) -> Outcome {
