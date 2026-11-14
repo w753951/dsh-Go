@@ -95,21 +95,37 @@ static BOOL DshIsBlank(CGImageRef image) {
   return same * 100 >= w * h * 99;
 }
 
-static CFTypeRef DshMakeEvent(CGFloat x, CGFloat y, BOOL touched) {
+// 触摸阶段。真实的一次触摸是 began → moved… → ended，系统靠 eventMask 里的
+// Start / Stop 位区分它们。只发 Range|Touch 而不带 Start/Stop 时，系统会把
+// 每一个事件都当成一次独立的、瞬时的触碰：点击碰巧能用（坐标跳一下就够了），
+// 但 UILongPressGestureRecognizer 永远等不到「按住并持续」的状态。
+enum {
+  DshPhaseBegin = 0,
+  DshPhaseMove = 1,
+  DshPhaseEnd = 2,
+};
+
+static CFTypeRef DshMakeEventPhase(CGFloat x, CGFloat y, int phase) {
   if (!gCreate) return NULL;
+  BOOL touched = phase != DshPhaseEnd;
+  uint32_t eventMask;
+  if (phase == DshPhaseBegin) {
+    // Range | Touch | Start
+    eventMask = 0x01u | 0x02u | 0x100u;
+  } else if (phase == DshPhaseMove) {
+    // Range | Touch | Position：触摸还在，位置可能略有变化
+    eventMask = 0x01u | 0x02u | 0x04u;
+  } else {
+    // Stop：抬起
+    eventMask = 0x08u;
+  }
   // 参数顺序必须严格照 IOHIDEventCreateDigitizerEvent 的签名来：
   //   (alloc, timeStamp, transducerType, index, identity, eventMask,
   //    buttonMask, x, y, z, tipPressure, barrelPressure, twist, range,
   //    touch, isDisplayIntegrated)
   //
-  // 之前这里把 x/y/z 与 touched 传错位了：x、y 位置上是 0，touched 落到了 z
-  // 的位置，而真正的 touch 参数永远是 0——等于告诉系统「手指没碰到屏幕」。
-  // 单次点击靠后面 SetFloat 强设坐标还能凑合生效，长按则永远不会成立，
-  // 这正是长按状态栏一直截不到图的原因。
-  //
-  // eventMask 用 Range|Touch（1|2），touched 时置 3；range 给 1；
-  // isDisplayIntegrated 置 1，表示坐标是屏幕上的绝对位置。
-  uint32_t eventMask = touched ? (1u | 2u) : 0u;
+  // 早先这里把 x/y/z 与 touched 传错位：x、y 位置上是 0，touched 落到了 z
+  // 的位置，真正的 touch 参数永远是 0——等于告诉系统「手指没碰到屏幕」。
   CFTypeRef e = gCreate(kCFAllocatorDefault, mach_absolute_time(),
                         2,          // transducerType: 2 = finger
                         0,          // index
@@ -131,6 +147,11 @@ static CFTypeRef DshMakeEvent(CGFloat x, CGFloat y, BOOL touched) {
     gSetFloat(e, 0x0D, (double)y);  // kIOHIDEventFieldDigitizerY
   }
   return e;
+}
+
+static CFTypeRef DshMakeEvent(CGFloat x, CGFloat y, BOOL touched) {
+  // 老接口：点按用 begin/end 两段就够。
+  return DshMakeEventPhase(x, y, touched ? DshPhaseBegin : DshPhaseEnd);
 }
 
 // 逐种 client 类型试一遍，报告哪种真的送进去了。
@@ -191,24 +212,23 @@ static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   if (!client) { printf("client nil\n"); return 2; }
   if (gSetProp) gSetProp(client, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
 
-  CFTypeRef down = DshMakeEvent(x, y, YES);
+  CFTypeRef down = DshMakeEventPhase(x, y, DshPhaseBegin);
   if (!down) { printf("down nil\n"); CFRelease(client); return 2; }
   gDispatch(client, down);
   CFRelease(down);
 
-  // 心跳：每 80ms 一个同位置触摸事件，让识别器知道手指没离开。
-  // 少于 80ms 意义不大，多于 120ms 有些识别器会判成触摸丢失。
+  // 心跳：每 80ms 一个 Move 阶段事件，让识别器知道手指没离开。
   int elapsed = 0;
   const int kBeat = 80;
   while (elapsed + kBeat < hold) {
     usleep(kBeat * 1000);
     elapsed += kBeat;
-    CFTypeRef beat = DshMakeEvent(x, y, YES);
+    CFTypeRef beat = DshMakeEventPhase(x, y, DshPhaseMove);
     if (beat) { gDispatch(client, beat); CFRelease(beat); }
   }
   if (hold > elapsed) usleep((useconds_t)(hold - elapsed) * 1000);
 
-  CFTypeRef up = DshMakeEvent(x, y, NO);
+  CFTypeRef up = DshMakeEventPhase(x, y, DshPhaseEnd);
   if (up) { gDispatch(client, up); CFRelease(up); }
   CFRelease(client);
   printf("长按 %dms 完成 (%g,%g)，心跳 %d 次\n",
