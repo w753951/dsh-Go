@@ -7,6 +7,14 @@ name: iOS build IPA
 on:
   push:
     branches: ['feat/ios-**', 'ios/**']
+    # 只在这些路径变化时构建 App。改插件、文档不该牵动一次二十多分钟的编译，
+    # 更不该把正在跑的那次取消掉。
+    paths:
+      - 'app/**'
+      - 'runtime/**'
+      - 'tooling/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/ios-compile.yml'
   workflow_dispatch:
     inputs:
       runner:
