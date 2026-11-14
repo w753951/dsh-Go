@@ -23,9 +23,6 @@
 #pragma mark - 抓屏途径
 
 typedef CGImageRef (*GetScreenFn)(void);
-typedef IOReturn (*IOSurfaceLockFn)(void *, uint32_t, uint32_t *);
-typedef IOReturn (*IOSurfaceUnlockFn)(void *, uint32_t, uint32_t *);
-typedef void *(*IOSurfaceGetBaseAddressFn)(void *);
 
 static void *DshOpen(const char *path) {
   return dlopen(path, RTLD_NOW | RTLD_LOCAL);
