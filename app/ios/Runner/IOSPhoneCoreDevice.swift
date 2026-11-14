@@ -741,6 +741,53 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     return false
   }
 
+  /// 本进程有没有平台级授权。只有带上它，`UIGetScreenImage` 才会返回整屏，
+  /// 否则拿到的是纯黑图（或只有本 App 的图层）。
+  static let hasPlatformEntitlement: Bool = {
+    typealias CreateTask = @convention(c) (CFAllocator?) -> CFTypeRef?
+    typealias CopyValue = @convention(c) (CFTypeRef?, CFString, UnsafeMutableRawPointer?) -> CFTypeRef?
+    guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW) else {
+      return false
+    }
+    defer { dlclose(handle) }
+    guard let rawCreate = dlsym(handle, "SecTaskCreateFromSelf"),
+          let rawCopy = dlsym(handle, "SecTaskCopyValueForEntitlement") else { return false }
+    let create = unsafeBitCast(rawCreate, to: CreateTask.self)
+    let copy = unsafeBitCast(rawCopy, to: CopyValue.self)
+    guard let task = create(kCFAllocatorDefault) else { return false }
+    for key in ["platform-application", "com.apple.private.security.no-sandbox"] {
+      if let value = copy(task, key as CFString, nil) {
+        if CFGetTypeID(value) == CFBooleanGetTypeID(),
+           CFBooleanGetValue((value as! CFBoolean)) { return true }
+        if CFGetTypeID(value) == CFStringGetTypeID() { return true }
+      }
+    }
+    return false
+  }()
+
+  /// 图是不是整张空白。抽样若干点，超过 99% 都是近黑/纯色就认为没截到内容。
+  static func isBlank(_ image: UIImage) -> Bool {
+    guard let cg = image.cgImage else { return true }
+    let w = 32, h = 32
+    var pixels = [UInt8](repeating: 0, count: w * h * 4)
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: w * 4, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    var uniform = 0
+    let first = (pixels[0], pixels[1], pixels[2])
+    for i in stride(from: 0, to: pixels.count, by: 4) {
+      let r = pixels[i], g = pixels[i + 1], b = pixels[i + 2]
+      // 近黑
+      if r < 12 && g < 12 && b < 12 { uniform += 1; continue }
+      // 和第一个采样点几乎一样（整张纯色）
+      if abs(Int(r) - Int(first.0)) < 6, abs(Int(g) - Int(first.1)) < 6,
+         abs(Int(b) - Int(first.2)) < 6 { uniform += 1 }
+    }
+    return uniform * 100 >= w * h * 99
+  }
+
   /// 通道是否可用。
   ///
   /// 只把 HID 注入所需的三个符号当硬性条件：抓屏函数在不同 iOS 版本上
@@ -859,6 +906,17 @@ final class IOSJailbreakDevice: @unchecked Sendable {
   private func capture() -> Outcome {
     guard let image = screenImage() else {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
+    }
+    // 纯黑图说明没有拿到屏幕内容（缺平台级权限时 UIGetScreenImage 会给全黑）。
+    // 以前这种图会被当成成功结果交上去，模型只能说「屏幕是黑的」，排查方向
+    // 全错。这里直接报清楚原因，并说明是哪一种。
+    if Self.isBlank(image) {
+      let reason = Self.hasPlatformEntitlement
+        ? "ERR_PHONE_JAILBREAK_CAPTURE"
+        : "ERR_PHONE_SCREEN_DENIED"
+      return Outcome(status: 1, metadata: Self.json([
+        "outcome": "notSent", "code": reason,
+      ]), bytes: nil)
     }
     guard let png = image.pngData() else {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
@@ -1116,10 +1174,8 @@ final class IOSJailbreakDevice: @unchecked Sendable {
           let size = screenSize() else {
       return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
     }
-    guard injectTap(x: CGFloat(x) * size.width, y: CGFloat(y) * size.height) else {
-      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_DISPATCH"]), bytes: nil)
-    }
-    return Outcome(status: 0, metadata: Self.json(["outcome": "dispatched"]), bytes: nil)
+    // 用可验证版本：点按前后对比画面，让「派发了」和「真的生效了」区分开。
+    return tapAndVerify(x: CGFloat(x) * size.width, y: CGFloat(y) * size.height)
   }
 
   private func swipe(_ values: [String: Any]) -> Outcome {
@@ -1162,15 +1218,30 @@ final class IOSJailbreakDevice: @unchecked Sendable {
 
   // MARK: - 抓屏
 
+  /// 抓整屏。
+  ///
+  /// 顺序很重要：`UIGetScreenImage` 是唯一在平台级权限下会返回「整个屏幕」的
+  /// 接口；`_UICreateScreenUIImage` 在没有平台权限时只给出本 App 自己的图层，
+  /// 截到的就是一张纯黑图——这正是「读屏全是黑」的原因。
+  ///
+  /// 另外必须有一步判活：拿到 0x0 或和我们自己的画面对不上时要能识别出来，
+  /// 不能让一张黑图被当成成功结果交给上层。
   private func screenImage() -> UIImage? {
-    // 越狱环境里最先试 UIKit 的私有整屏截图，它在 iOS 15 上仍然存在。
-    if let raw = Self.symbols.createScreenImage?() {
-      if let image = raw.takeRetainedValue() as UIImage? { return image }
-    }
+    // 1) 平台级整屏截图（需要 platform-application）。
     if let raw = Self.symbols.screenImage?() {
-      if let cg = raw.takeRetainedValue() as CGImage? { return UIImage(cgImage: cg) }
+      if let cg = raw.takeRetainedValue() as CGImage?,
+        cg.width > 0, cg.height > 0 {
+        return UIImage(cgImage: cg)
+      }
     }
-    // 回退：只能截本 App 自己的窗口，用于证明通道起码通了一半。
+    // 2) UIKit 的私有整屏截图；有平台权限时同样能拿到全屏。
+    if let raw = Self.symbols.createScreenImage?() {
+      if let image = raw.takeRetainedValue() as UIImage?,
+        image.size.width > 0, image.size.height > 0 {
+        return image
+      }
+    }
+    // 3) 回退：只能截本 App 自己的窗口。上层会看出前台是自己。
     let windows = UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
       .filter { !$0.isHidden && $0.windowLevel == .normal }
@@ -1217,6 +1288,55 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     usleep(60_000)
     if let up = digitizer(x: x, y: y, touched: false) { send(up) }
     return true
+  }
+
+  /// 点按并验证是否真的改变了画面。
+  ///
+  /// `injectTap` 只要事件对象建出来就返回 true，完全不看系统有没有接受。
+  /// 于是「点按成功」和「事件被内核丢弃」在日志里长得一模一样，谁也无法
+  /// 判断 HID 注入到底通没通。这里在点按前后各截一张图做对比：画面变了
+  /// 才算真的生效。读不到屏幕时无法判定，如实报告 unknown。
+  private func tapAndVerify(x: CGFloat, y: CGFloat) -> Outcome {
+    let before = screenImage().flatMap { Self.coarseSignature($0) }
+    guard let down = digitizer(x: x, y: y, touched: true) else {
+      return Outcome(status: 2, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_ARGUMENTS"]), bytes: nil)
+    }
+    send(down)
+    usleep(60_000)
+    if let up = digitizer(x: x, y: y, touched: false) { send(up) }
+    // 给界面一点时间响应，再抓一次。
+    usleep(350_000)
+    let after = screenImage().flatMap { Self.coarseSignature($0) }
+    var meta: [String: Any] = ["outcome": "dispatched"]
+    if let before, let after {
+      let changed = before != after
+      meta["verified"] = changed
+      meta["changedPixels"] = changed ? 1 : 0
+      if !changed {
+        // 派发了但画面没动：要么点空了，要么事件被丢弃。
+        meta["note"] = Self.hasPlatformEntitlement
+          ? "事件已派发但画面没有变化；可能点在空白处，或目标未响应。"
+          : "事件已派发但画面没有变化；本机没有平台级授权，HID 可能被系统丢弃。"
+      }
+    } else {
+      meta["verified"] = NSNull()
+      meta["note"] = "读屏不可用，无法验证点按是否生效。"
+    }
+    return Outcome(status: 0, metadata: Self.json(meta), bytes: nil)
+  }
+
+  /// 32×32 缩略图作为「画面指纹」，用来判断两次截图是否相同。
+  private static func coarseSignature(_ image: UIImage) -> [UInt8]? {
+    guard let cg = image.cgImage else { return nil }
+    let w = 32, h = 32
+    var pixels = [UInt8](repeating: 0, count: w * h * 4)
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: w * 4, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    // 量化到 16 级，容忍压缩和抗锯齿的细微差别。
+    return pixels.map { $0 & 0xF0 }
   }
 
   private func injectSwipe(from: CGPoint, to: CGPoint) -> Bool {
