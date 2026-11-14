@@ -97,13 +97,38 @@ static BOOL DshIsBlank(CGImageRef image) {
 
 static CFTypeRef DshMakeEvent(CGFloat x, CGFloat y, BOOL touched) {
   if (!gCreate) return NULL;
+  // 参数顺序必须严格照 IOHIDEventCreateDigitizerEvent 的签名来：
+  //   (alloc, timeStamp, transducerType, index, identity, eventMask,
+  //    buttonMask, x, y, z, tipPressure, barrelPressure, twist, range,
+  //    touch, isDisplayIntegrated)
+  //
+  // 之前这里把 x/y/z 与 touched 传错位了：x、y 位置上是 0，touched 落到了 z
+  // 的位置，而真正的 touch 参数永远是 0——等于告诉系统「手指没碰到屏幕」。
+  // 单次点击靠后面 SetFloat 强设坐标还能凑合生效，长按则永远不会成立，
+  // 这正是长按状态栏一直截不到图的原因。
+  //
+  // eventMask 用 Range|Touch（1|2），touched 时置 3；range 给 1；
+  // isDisplayIntegrated 置 1，表示坐标是屏幕上的绝对位置。
+  uint32_t eventMask = touched ? (1u | 2u) : 0u;
   CFTypeRef e = gCreate(kCFAllocatorDefault, mach_absolute_time(),
-                        2, 0, 0, 0, 0, 0, 0, touched ? 1 : 0,
-                        (double)x, (double)y, 0, 0, 0, 0);
+                        2,          // transducerType: 2 = finger
+                        0,          // index
+                        1,          // identity: 固定成同一根手指
+                        eventMask,  // eventMask
+                        0,          // buttonMask
+                        (double)x,  // x
+                        (double)y,  // y
+                        0,          // z
+                        0,          // tipPressure
+                        0,          // barrelPressure
+                        0,          // twist
+                        1,          // range
+                        touched ? 1 : 0,  // touch
+                        1);         // isDisplayIntegrated
   if (!e) return NULL;
   if (gSetFloat) {
-    gSetFloat(e, 0x0C, (double)x);
-    gSetFloat(e, 0x0D, (double)y);
+    gSetFloat(e, 0x0C, (double)x);  // kIOHIDEventFieldDigitizerX
+    gSetFloat(e, 0x0D, (double)y);  // kIOHIDEventFieldDigitizerY
   }
   return e;
 }
@@ -150,11 +175,14 @@ static int DshTapDiag(CGFloat x, CGFloat y, int durationMs) {
 }
 
 
-// 单次长按：只用一个 client，按住期间持续发移动事件。
+// 单次长按：一个 client，按下一次、等、抬起一次。
 //
-// 之前 tap 走的 DshTapDiag 会循环 5 种 client，等于连点 5 次、每次间隔 0.4 秒——
-// 系统把它看成多次点击，永远不构成「长按」。长按需要一次持续的触摸，
-// 而且中途要有移动事件让系统知道手指还在。
+// 之前的两个错误：
+//   1) tap 走的 DshTapDiag 会循环 5 种 client，等于连点 5 次、每次间隔 0.4 秒，
+//      系统把它看成多次点击，永远不构成「长按」。
+//   2) 按住期间每 60ms 补一个「触摸中」事件，手一直发同位置事件反而不像真实
+//      按住——真实手指静止时系统是收不到事件的。
+// 现在恢复成最朴素的样子：按下 → 什么都不发 → 抬起。
 static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   if (!DshLoadIOKit()) { printf("IOKit fail\n"); return 2; }
   int hold = durationMs > 0 ? durationMs : 1200;
@@ -167,14 +195,8 @@ static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   gDispatch(client, down);
   CFRelease(down);
 
-  // 按住期间每 60ms 发一次同位置移动事件，模拟手指停在那里。
-  int elapsed = 0;
-  while (elapsed < hold) {
-    usleep(60 * 1000);
-    elapsed += 60;
-    CFTypeRef move = DshMakeEvent(x, y, YES);
-    if (move) { gDispatch(client, move); CFRelease(move); }
-  }
+  // 按住期间不派发任何事件：手指静止时系统本来就没有新事件。
+  usleep((useconds_t)hold * 1000);
 
   CFTypeRef up = DshMakeEvent(x, y, NO);
   if (up) { gDispatch(client, up); CFRelease(up); }
