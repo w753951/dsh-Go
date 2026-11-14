@@ -30,7 +30,7 @@ static void DshLog(NSString *line) {
   } else {
     [h seekToEndOfFile];
     [h writeData:d];
-    [h closeHandle];
+    [h closeFile];
   }
 }
 
