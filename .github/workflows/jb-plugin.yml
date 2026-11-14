@@ -124,6 +124,8 @@ jobs:
             -framework Foundation
             -framework UIKit
             -framework CoreGraphics
+            -framework IOSurface
+            -framework ImageIO
             -o build/usr/bin/dshtool
             jbplugin/dshtool.m
           )
