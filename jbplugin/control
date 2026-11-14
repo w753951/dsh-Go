@@ -1,0 +1,9 @@
+Package: com.dshgo.screenservice
+Name: DSH Go Screen Service
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 给 DSH Go 提供整屏截图能力。注入 SpringBoard，只在 127.0.0.1 上应答带密钥的请求；不做点按、不联网、不读其它数据。
+Maintainer: dsh-go
+Author: dsh-go
+Section: Tweaks
+Depends: mobilesubstrate
