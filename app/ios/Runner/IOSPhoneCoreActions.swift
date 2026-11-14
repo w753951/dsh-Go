@@ -105,7 +105,9 @@ final class IOSPhoneCoreActions {
         let wanted = plan.parameters["app"] as! String
         if let identifier = PhoneRunnerAppCatalog.bundleID(for: wanted) { application = identifier }
         else {
-          let apps = try await applications(execution, current: live)
+          // 拉列表本身可能失败；那时若别名表也没命中，就按「找不到这个应用」报，
+          // 不要抛 ERR_PHONE_CORE_PROTOCOL 把整次 open 弄成协议错误。
+          let apps = (try? await applications(execution, current: live)) ?? []
           application = PhoneRunnerAppCatalog.bundleID(for: wanted, apps: apps)
         }
         guard let application else {
@@ -362,13 +364,23 @@ final class IOSPhoneCoreActions {
     let reply = try await send(["op": "apps"], execution, current: current)
     guard reply.metadata.kind == "apps", let data = reply.bytes, data.count <= 1024 * 1024,
       let value = try? JSONDecoder().decode([String: [[String: String]]].self, from: data),
-      let apps = value["apps"], apps.count <= 4096,
-      apps.allSatisfy({ item in
-        guard let name = item["name"], !name.isEmpty, name.utf8.count <= 512,
-          let id = item["id"], id.utf8.count <= 255 else { return false }
-        return PhoneRunnerAppCatalog.bundleID(for: id) == id
-      }) else { throw IOSPhoneCoreFailure(code: "ERR_PHONE_CORE_PROTOCOL") }
-    return apps
+      let apps = value["apps"], apps.count <= 4096 else {
+      throw IOSPhoneCoreFailure(code: "ERR_PHONE_CORE_PROTOCOL")
+    }
+    // 逐个过滤，不再要求整批都合法。
+    //
+    // 以前用 allSatisfy 把整份列表判死：内置兜底表里存在
+    // com.19lou.nineteenlou 这种不以字母开头的包名，一条不合格就让
+    // 「查询可启动应用」整个报 ERR_PHONE_CORE_PROTOCOL——用户看到的
+    // 「打开微信失败」其实是被这一条无关的应用拖垮的。
+    let usable = apps.filter { item in
+      guard let name = item["name"], !name.isEmpty, name.utf8.count <= 512,
+        let id = item["id"], !id.isEmpty, id.utf8.count <= 255 else { return false }
+      // 只排除明显不是 bundle id 的脏数据（含空格、换行的）。
+      return !id.contains(" ") && !id.contains("\n")
+    }
+    guard !usable.isEmpty else { throw IOSPhoneCoreFailure(code: "ERR_PHONE_CORE_PROTOCOL") }
+    return usable
   }
 
   private func observe(_ reply: IOSPhoneCoreReply, _ execution: Execution, image: Bool, detail: Bool,
