@@ -904,25 +904,40 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     }
   }
 
-  /// 读相册里最新的整屏截图。
+  /// 读最新的一张整屏截图。
   ///
-  /// App 在沙盒里调 `UIGetScreenImage` 只能拿到自己的图层，截出来是黑的；
-  /// 越狱机上装的 NiceBarX 把「状态栏电池单击」绑到了「DSH截图」快捷指令，
-  /// 那条路在 SpringBoard 内部跑，能把**整屏**存进相册。
+  /// 三条路，按优先级：
   ///
-  /// 必须走 Photos 框架，不能直接读文件：`platform-application` 只放开私有
-  /// API，文件系统沙盒照样拦着 `/var/mobile/Media/DCIM`，`contentsOfDirectory`
-  /// 会直接失败。相册访问要 PHPhotoLibrary 授权。
+  /// 1. **App Group 里的 `dsh-shot.png`**（主力）。TrollStore 安装的 App 拿不到
+  ///    TCC 相册权限——TCC 依赖正规代码签名身份，ad-hoc 签名不被认可，系统
+  ///    连授权弹窗都不会给，`PHPhotoLibrary` 直接失败。同时 `platform-application`
+  ///    只放开私有 API，不解除文件沙盒，读沙盒外的 DCIM 也会被拒。
+  ///    App Group 是唯一"既在沙盒权限内、外部又能写进来"的通道：越狱侧（或
+  ///    root shell）把截图复制进去，App 自己读这份拷贝。
   ///
-  /// 只认 `maxAge` 秒内的照片：读屏要的是「当前屏幕」，拿一张几分钟前的旧图
-  /// 当现状会让模型对着过期画面下判断。
-  private func latestAlbumScreenshot(maxAge: TimeInterval = 120) -> UIImage? {
+  /// 2. PHPhotoLibrary（回退，TrollStore 下通常不可用）。
+  ///
+  /// 只认 `maxAge` 秒内的图：读屏要「当前屏幕」，拿旧图会让模型按过期画面判断。
+  private func latestAlbumScreenshot(maxAge: TimeInterval = 180) -> UIImage? {
+    // ① App Group 里由外部同步进来的截图
+    let groupID = "group.io.github.ccch1mneyyy.dshgo"
+    if let group = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: groupID) {
+      let shot = group.appendingPathComponent("dsh-shot.png")
+      if let attrs = try? FileManager.default.attributesOfItem(atPath: shot.path),
+        let mtime = attrs[.modificationDate] as? Date,
+        Date().timeIntervalSince(mtime) < maxAge,
+        let image = UIImage(contentsOfFile: shot.path) {
+        return image
+      }
+    }
+
+    // ② 回退：PHPhotoLibrary
     var status = PHPhotoLibrary.authorizationStatus()
     if status == .notDetermined {
-      // 首次需要授权。这里同步等一下，避免读屏在弹窗还没点的时候直接失败。
       let sema = DispatchSemaphore(value: 0)
       PHPhotoLibrary.requestAuthorization { _ in sema.signal() }
-      _ = sema.wait(timeout: .now() + 8)
+      _ = sema.wait(timeout: .now() + 5)
       status = PHPhotoLibrary.authorizationStatus()
     }
     guard status == .authorized || status == .limited else { return nil }
@@ -957,7 +972,7 @@ final class IOSJailbreakDevice: @unchecked Sendable {
       image = result
       sema.signal()
     }
-    _ = sema.wait(timeout: .now() + 10)
+    _ = sema.wait(timeout: .now() + 6)
     return image
   }
 
