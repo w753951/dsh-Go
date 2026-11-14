@@ -60,6 +60,7 @@ jobs:
             -O2
             -framework Foundation
             -framework UIKit
+            -framework CoreGraphics
             -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
             -o build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
             jbplugin/DshScreenshotService.m
