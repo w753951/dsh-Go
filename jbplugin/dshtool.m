@@ -157,6 +157,36 @@ int main(int argc, char *argv[]) {
     }
     NSString *cmd = [NSString stringWithUTF8String:argv[1]];
 
+    if ([cmd isEqualToString:@"kbtest"]) {
+      // 发一个 Home 键。用来判断 HID 通道是否真的通：按键生效而触摸不生效，
+      // 就说明触摸事件缺字段，不是权限或通道的问题。
+      void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",
+                           RTLD_NOW | RTLD_LOCAL);
+      if (!iokit) { printf("IOKit fail\n"); return 2; }
+      typedef CFTypeRef (*SysCreateFn)(CFAllocatorRef);
+      typedef void (*DispFn)(CFTypeRef, CFTypeRef);
+      typedef void (*SetPropFn)(CFTypeRef, CFStringRef, CFTypeRef);
+      typedef CFTypeRef (*CreateKbFn)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint8_t, uint32_t);
+      SysCreateFn sc = (SysCreateFn)dlsym(iokit, "IOHIDEventSystemClientCreate");
+      DispFn dp = (DispFn)dlsym(iokit, "IOHIDEventSystemClientDispatchEvent");
+      SetPropFn sp = (SetPropFn)dlsym(iokit, "IOHIDEventSystemClientSetProperty");
+      CreateKbFn ck = (CreateKbFn)dlsym(iokit, "IOHIDEventCreateKeyboardEvent");
+      printf("sysCreate=%d dispatch=%d createKeyboard=%d\n", sc != NULL, dp != NULL, ck != NULL);
+      if (!sc || !dp || !ck) return 2;
+      CFTypeRef client = sc(kCFAllocatorDefault);
+      if (!client) { printf("client nil\n"); return 2; }
+      if (sp) sp(client, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+      CFTypeRef down = ck(kCFAllocatorDefault, mach_absolute_time(), 0x40, 0, 1, 0);
+      if (!down) { printf("event nil\n"); return 2; }
+      dp(client, down);
+      usleep(90000);
+      CFTypeRef up = ck(kCFAllocatorDefault, mach_absolute_time(), 0x40, 0, 0, 0);
+      if (up) { dp(client, up); CFRelease(up); }
+      CFRelease(down);
+      CFRelease(client);
+      printf("Home 键已派发\n");
+      return 0;
+    }
     if ([cmd isEqualToString:@"tapdiag"]) {
       if (argc < 4) return 64;
       return DshTapDiag(atof(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 80);
