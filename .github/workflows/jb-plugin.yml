@@ -162,16 +162,18 @@ jobs:
           mkdir -p pkg-tool/DEBIAN pkg-tool/usr/bin
           cp build/usr/bin/dshtool pkg-tool/usr/bin/dshtool
           chmod 0755 pkg-tool/usr/bin/dshtool
-          cat > pkg-tool/DEBIAN/control <<'CTLEOF'
-Package: com.dshgo.dshtool
-Name: DSH Go Screen Tool
-Version: 1.0.0
-Architecture: iphoneos-arm
-Description: 读屏与点按的命令行工具。由本机 sshd 以 root 调用。
-Maintainer: dsh-go
-Section: Utilities
-Installed-Size: 128
-CTLEOF
+          # 用 printf 写 control：heredoc 的内容在 YAML 里必须缩进，缩进了又会把
+          # 空格写进 control 文件，两头不讨好。printf 每行一个参数最干净。
+          printf '%s\n' \
+            'Package: com.dshgo.dshtool' \
+            'Name: DSH Go Screen Tool' \
+            'Version: 1.0.0' \
+            'Architecture: iphoneos-arm' \
+            'Description: 读屏与点按的命令行工具，由本机 sshd 以 root 调用。' \
+            'Maintainer: dsh-go' \
+            'Section: Utilities' \
+            'Installed-Size: 128' \
+            > pkg-tool/DEBIAN/control
           dpkg-deb --build --root-owner-group pkg-tool DshTool.deb
           echo "=== DshTool.deb ==="
           dpkg-deb -c DshTool.deb
