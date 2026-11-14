@@ -99,6 +99,11 @@ static BOOL DshIsBlank(CGImageRef image) {
 // Start / Stop 位区分它们。只发 Range|Touch 而不带 Start/Stop 时，系统会把
 // 每一个事件都当成一次独立的、瞬时的触碰：点击碰巧能用（坐标跳一下就够了），
 // 但 UILongPressGestureRecognizer 永远等不到「按住并持续」的状态。
+// 触摸相位。实测教训：给 eventMask 加 Start(0x100)/Stop(0x08)/Position(0x04)
+// 会让整个注入失效——连最简单的点击都点不开 App 了。
+//
+// 能工作的组合只有一个：touched 时 eventMask = Range|Touch（0x03），抬起时 0。
+// 系统靠坐标跳变识别点击。这套虽然在语义上「不完整」，但它确实是通的那条。
 enum {
   DshPhaseBegin = 0,
   DshPhaseMove = 1,
@@ -108,39 +113,11 @@ enum {
 static CFTypeRef DshMakeEventPhase(CGFloat x, CGFloat y, int phase) {
   if (!gCreate) return NULL;
   BOOL touched = phase != DshPhaseEnd;
-  uint32_t eventMask;
-  if (phase == DshPhaseBegin) {
-    // Range | Touch | Start
-    eventMask = 0x01u | 0x02u | 0x100u;
-  } else if (phase == DshPhaseMove) {
-    // Range | Touch | Position：触摸还在，位置可能略有变化
-    eventMask = 0x01u | 0x02u | 0x04u;
-  } else {
-    // Stop：抬起
-    eventMask = 0x08u;
-  }
-  // 参数顺序必须严格照 IOHIDEventCreateDigitizerEvent 的签名来：
-  //   (alloc, timeStamp, transducerType, index, identity, eventMask,
-  //    buttonMask, x, y, z, tipPressure, barrelPressure, twist, range,
-  //    touch, isDisplayIntegrated)
-  //
-  // 早先这里把 x/y/z 与 touched 传错位：x、y 位置上是 0，touched 落到了 z
-  // 的位置，真正的 touch 参数永远是 0——等于告诉系统「手指没碰到屏幕」。
+  // 只有这一个 eventMask 组合被验证过能用。
+  uint32_t eventMask = touched ? 0x03u : 0x00u;
   CFTypeRef e = gCreate(kCFAllocatorDefault, mach_absolute_time(),
-                        2,          // transducerType: 2 = finger
-                        0,          // index
-                        1,          // identity: 固定成同一根手指
-                        eventMask,  // eventMask
-                        0,          // buttonMask
-                        (double)x,  // x
-                        (double)y,  // y
-                        0,          // z
-                        0,          // tipPressure
-                        0,          // barrelPressure
-                        0,          // twist
-                        1,          // range
-                        touched ? 1 : 0,  // touch
-                        1);         // isDisplayIntegrated
+                        2, 0, 0, 0, 0, 0, 0, touched ? 1 : 0,
+                        (double)x, (double)y, 0, 0, 0, 0);
   if (!e) return NULL;
   if (gSetFloat) {
     gSetFloat(e, 0x0C, (double)x);  // kIOHIDEventFieldDigitizerX
