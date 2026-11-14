@@ -61,7 +61,6 @@ jobs:
             -framework Foundation
             -framework UIKit
             -framework CoreGraphics
-            -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
             -o build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
             jbplugin/DshScreenshotService.m
           )
@@ -73,8 +72,7 @@ jobs:
           # 探针：极少代码，只写一行日志。用来单独验证注入机制是否接受我们的 dylib。
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 \
             -isysroot "$SDK" -dynamiclib -fobjc-arc -O1 \
-            -framework Foundation \
-            -install_name /Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib \
+            -framework Foundation \ \
             -o build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib \
             jbplugin/DshProbe.m
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
