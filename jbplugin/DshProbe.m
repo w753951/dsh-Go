@@ -1,32 +1,40 @@
 //
-// DshProbe.m —— SpringBoard 内的探针 + 整屏抓取。
+// DshProbe.m —— SpringBoard 内的探针（分步验证版）
 //
-// 为什么改写成"全动态加载"：
-//   之前 DshScreenshotService 静态链接了 UIKit + CoreGraphics，注入进
-//   SpringBoard 时在 libobjc 加载阶段就崩了，崩溃日志写的是
-//   "possible pointer authentication failure"——arm64e 上，dylib 对
-//   链接进来的 ObjC/CG 符号会生成需要 PAC 的 chained fixup，未正确签名
-//   就会被内核拒绝。
+// 目标：在 SpringBoard 进程内抓到整屏。
 //
-//   而只链接 Foundation 的探针能稳定加载。所以这里把 UIKit / CoreGraphics /
-//   ImageIO 全部改成运行时 dlopen + dlsym，链接期不产生任何静态引用。
+// 已经确认的边界：
+//   - 只链 Foundation 的 dylib 能稳定注入（双切片 arm64+arm64e）
+//   - 静态链接 UIKit/CoreGraphics 会在 libobjc 加载期 PAC 崩
+//   - UIGetScreenImage 一调用就让 SpringBoard 崩（废弃 API，iOS 15 不可用）
 //
-// 产出：把整屏写成原始 BGRA 像素（.raw）+ 一个文本头，电脑端转 PNG。
-// 不在这里做 PNG 编码，避免再引入 ImageIO 的依赖。
+// 所以这里换路：用 objc_msgSend 运行时调 UIApplication / UIWindow，让
+// SpringBoard 渲染自己的视图层级。全程零静态 UIKit 符号。
+//
+// 每一步都写日志。如果崩溃，最后一条日志就是崩溃点，不用猜。
 //
 
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 
-static void DshLog(NSString *line) {
-  NSString *path = @"/var/mobile/dsh-probe.log";
-  NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
+static NSString *const kLogPath = @"/var/mobile/dsh-probe.log";
+
+static void DshLog(NSString *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
+  va_end(ap);
   NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+  NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:kLogPath];
   if (!h) {
-    [d writeToFile:path atomically:NO];
+    [d writeToFile:kLogPath atomically:NO];
   } else {
     [h seekToEndOfFile];
     [h writeData:d];
@@ -34,94 +42,153 @@ static void DshLog(NSString *line) {
   }
 }
 
-// 从 dlopen 的库里取符号。取不到就返回 NULL，由调用方判断。
-static void *DshSym(void *handle, const char *name) {
-  if (!handle) return NULL;
-  return dlsym(handle, name);
+// 分步执行，每步写日志。返回 YES 表示走到这一步还没崩。
+typedef BOOL (*StepFn)(NSString **detail);
+
+static void DshRunStep(const char *name, StepFn fn) {
+  DshLog(@"[step] %s ...\n", name);
+  NSString *detail = nil;
+  BOOL ok = NO;
+  @try {
+    ok = fn(&detail);
+  } @catch (NSException *e) {
+    DshLog(@"[step] %s EXCEPTION %@: %@\n", name, e.name, e.reason);
+    return;
+  }
+  DshLog(@"[step] %s -> %s %@\n", name, ok ? "ok" : "fail",
+         detail ? detail : @"");
 }
 
-// 抓整屏 → /var/mobile/dsh-screen.raw（BGRA）+ /var/mobile/dsh-screen.txt（尺寸）
-static BOOL DshGrabFullScreen(void) {
+#pragma mark - 步骤 1：能否拿到 UIApplication
+
+static BOOL StepApplication(NSString **detail) {
   void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
-  void *cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW);
-  if (!uikit || !cg) {
-    DshLog(@"grab: dlopen failed\n");
+  if (!uikit) { *detail = @"dlopen UIKit 失败"; return NO; }
+  DshLog(@"  UIKit handle=%p\n", uikit);
+
+  Class appCls = NSClassFromString(@"UIApplication");
+  if (!appCls) { *detail = @"UIApplication 类不存在"; return NO; }
+  DshLog(@"  UIApplication class=%p\n", (void *)appCls);
+
+  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
+  DshLog(@"  sharedApplication=%p\n", (void *)app);
+  if (!app) { *detail = @"sharedApplication 为 nil"; return NO; }
+
+  *detail = [NSString stringWithFormat:@"app=%p", (void *)app];
+  return YES;
+}
+
+#pragma mark - 步骤 2：能否拿到窗口
+
+static BOOL StepWindow(NSString **detail) {
+  Class appCls = NSClassFromString(@"UIApplication");
+  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
+  if (!app) { *detail = @"app nil"; return NO; }
+
+  // SpringBoard 里 keyWindow 常常是 nil，改取 windows 里最靠前的。
+  id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+  NSUInteger count = windows ? ((NSUInteger (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count")) : 0;
+  DshLog(@"  windows=%p count=%lu\n", (void *)windows, (unsigned long)count);
+  if (count == 0) { *detail = @"没有窗口"; return NO; }
+
+  id window = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
+      sel_registerName("objectAtIndex:"), count - 1);
+  DshLog(@"  window=%p class=%@\n", (void *)window,
+         ((id (*)(id, SEL))objc_msgSend)(window, sel_registerName("class")));
+
+  CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(window, sel_registerName("bounds"));
+  DshLog(@"  bounds=%.1f x %.1f\n", bounds.size.width, bounds.size.height);
+
+  *detail = [NSString stringWithFormat:@"%.0fx%.0f", bounds.size.width, bounds.size.height];
+  return YES;
+}
+
+#pragma mark - 步骤 3：渲染视图层级
+
+static BOOL StepRender(NSString **detail) {
+  Class appCls = NSClassFromString(@"UIApplication");
+  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
+  id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+  NSUInteger count = ((NSUInteger (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count"));
+  if (count == 0) { *detail = @"没有窗口"; return NO; }
+
+  // SpringBoard 的窗口层级有好几层（壁纸、图标、状态栏…）。
+  // 用最大的那个窗口做容器，把所有窗口依次画进去。
+  CGRect unionRect = CGRectZero;
+  for (NSUInteger i = 0; i < count; i++) {
+    id w = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
+        sel_registerName("objectAtIndex:"), i);
+    CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
+    if (b.size.width > unionRect.size.width) unionRect = b;
+  }
+  if (unionRect.size.width <= 0) { *detail = @"窗口尺寸为 0"; return NO; }
+
+  // UIGraphicsBeginImageContextWithOptions(size, opaque, scale) 是 C 函数，
+  // 通过 dlsym 取，避免任何静态符号。
+  void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
+  typedef void (*BeginCtx)(CGSize, BOOL, CGFloat);
+  typedef id (*GetImage)(void);
+  typedef void (*EndCtx)(void);
+  BeginCtx begin = (BeginCtx)dlsym(uikit, "UIGraphicsBeginImageContextWithOptions");
+  GetImage getImage = (GetImage)dlsym(uikit, "UIGraphicsGetImageFromCurrentImageContext");
+  EndCtx end = (EndCtx)dlsym(uikit, "UIGraphicsEndImageContext");
+  if (!begin || !getImage || !end) {
+    *detail = @"图形上下文符号缺失";
     return NO;
   }
 
-  typedef void *(*GetScreenFn)(void);
-  GetScreenFn getScreen = (GetScreenFn)DshSym(uikit, "UIGetScreenImage");
-  if (!getScreen) {
-    DshLog(@"grab: UIGetScreenImage 缺失\n");
-    return NO;
+  begin(unionRect.size, NO, 0);
+  DshLog(@"  上下文已开 %.0fx%.0f\n", unionRect.size.width, unionRect.size.height);
+
+  for (NSUInteger i = 0; i < count; i++) {
+    id w = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
+        sel_registerName("objectAtIndex:"), i);
+    CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
+    @try {
+      ((void (*)(id, SEL, CGRect, BOOL))objc_msgSend)(w,
+          sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
+      DshLog(@"  窗口 %lu 已绘制\n", (unsigned long)i);
+    } @catch (NSException *e) {
+      DshLog(@"  窗口 %lu 绘制异常 %@\n", (unsigned long)i, e.name);
+    }
   }
 
-  typedef size_t (*GetW)(void *);
-  typedef size_t (*GetH)(void *);
-  typedef size_t (*GetBPR)(void *);
-  typedef void *(*GetProvider)(void *);
-  typedef void *(*ProviderCopyData)(void *);
-  typedef const void *(*DataGetBytesPtr)(void *);
-  typedef long (*DataGetLength)(void *);
+  id image = getImage();
+  end();
+  DshLog(@"  图像=%p\n", (void *)image);
+  if (!image) { *detail = @"渲染结果为 nil"; return NO; }
 
-  GetW imgW = (GetW)DshSym(cg, "CGImageGetWidth");
-  GetH imgH = (GetH)DshSym(cg, "CGImageGetHeight");
-  GetBPR imgBPR = (GetBPR)DshSym(cg, "CGImageGetBytesPerRow");
-  GetProvider imgProv = (GetProvider)DshSym(cg, "CGImageGetDataProvider");
-  ProviderCopyData provCopy = (ProviderCopyData)DshSym(cg, "CGDataProviderCopyData");
-  DataGetBytesPtr dataBytes = (DataGetBytesPtr)DshSym(cg, "CFDataGetBytePtr");
-  DataGetLength dataLen = (DataGetLength)DshSym(cg, "CFDataGetLength");
-  if (!imgW || !imgH || !imgBPR || !imgProv || !provCopy || !dataBytes || !dataLen) {
-    DshLog(@"grab: CoreGraphics 符号缺失\n");
-    return NO;
-  }
+  // 转 PNG。UIImagePNGRepresentation 是 C 函数。
+  typedef id (*PngFn)(id);
+  PngFn toPng = (PngFn)dlsym(uikit, "UIImagePNGRepresentation");
+  if (!toPng) { *detail = @"PNG 符号缺失"; return NO; }
+  id data = toPng(image);
+  if (!data) { *detail = @"PNG 编码失败"; return NO; }
 
-  void *image = getScreen();
-  if (!image) {
-    DshLog(@"grab: UIGetScreenImage 返回 NULL\n");
-    return NO;
-  }
-
-  size_t w = imgW(image), h = imgH(image), bpr = imgBPR(image);
-  void *provider = imgProv(image);
-  void *data = provCopy(provider);
-  const unsigned char *bytes = (const unsigned char *)dataBytes(data);
-  long len = dataLen(data);
-  if (!bytes || len <= 0) {
-    DshLog([NSString stringWithFormat:@"grab: 数据为空 w=%zu h=%zu len=%ld\n", w, h, len]);
-    return NO;
-  }
-
-  // 抽样判断是否全黑：全 0 说明这个进程里也拿不到画面。
-  int nonZero = 0;
-  for (long i = 0; i < len; i += 4001) {
-    if (bytes[i]) { nonZero++; if (nonZero > 50) break; }
-  }
-
-  NSData *raw = [NSData dataWithBytes:bytes length:(NSUInteger)len];
-  BOOL ok = [raw writeToFile:@"/var/mobile/dsh-screen.raw" atomically:NO];
-  NSString *meta = [NSString stringWithFormat:@"%zux%zu bpr=%zu len=%ld nonzero=%d ok=%d\n",
-                    w, h, bpr, len, nonZero, ok];
-  [meta writeToFile:@"/var/mobile/dsh-screen.txt" atomically:NO encoding:NSUTF8StringEncoding error:NULL];
-  DshLog([@"grab: " stringByAppendingString:meta]);
+  NSUInteger len = ((NSUInteger (*)(id, SEL))objc_msgSend)(data, sel_registerName("length"));
+  BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(data,
+      sel_registerName("writeToFile:atomically:"), @"/var/mobile/dsh-screen.png", NO);
+  *detail = [NSString stringWithFormat:@"png=%lu 字节 写入=%d", (unsigned long)len, ok];
   return ok;
 }
+
+#pragma mark - 入口
 
 __attribute__((constructor))
 static void DshProbeInit(void) {
   @autoreleasepool {
-    DshLog([NSString stringWithFormat:@"loaded uid=%d pid=%d bundle=%@\n",
-            getuid(), getpid(), [[NSBundle mainBundle] bundleIdentifier]]);
+    DshLog(@"=== loaded uid=%d pid=%d bundle=%@ ===\n",
+           getuid(), getpid(), [[NSBundle mainBundle] bundleIdentifier]);
 
-    // 必须投到后台队列，不能投 main queue。
-    // 实测：投 main queue 时 SpringBoard 启动期间主队列被占满，block 永远
-    // 排不上，日志里只有 "loaded" 一行、截图从不发生。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+    // 后台队列 + 8 秒：SpringBoard 启动期主队列排满，投 main queue 会一直不执行。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
       @autoreleasepool {
-        DshLog(@"timer fired, grabbing\n");
-        BOOL ok = DshGrabFullScreen();
-        DshLog(ok ? @"grab done ok\n" : @"grab failed\n");
+        DshLog(@"timer fired\n");
+        DshRunStep("application", StepApplication);
+        DshRunStep("window", StepWindow);
+        DshRunStep("render", StepRender);
+        DshLog(@"=== all steps done ===\n");
       }
     });
   }
