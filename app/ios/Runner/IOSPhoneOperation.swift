@@ -29,11 +29,17 @@ struct IOSPhoneOperation {
     case .apps:
       allowed = ["query"]; try optionalString("query", limit: 256)
     case .open:
-      allowed = ["app", "background"]
+      // 同样容错：打开应用后常常紧接着读屏，模型会把上一次的观察编号一起带上。
+      allowed = ["app", "background", "screen", "observation"]
       _ = try requiredString("app", limit: 256); try optionalBool("background")
+      try optionalString("screen", limit: 96); try optionalString("observation", limit: 96)
     case .screen:
-      allowed = ["image", "detail", "background"]
+      // 模型经常顺手带上 `screen`（那是 tap/scroll/type 用来引用观察编号的键），
+      // 读屏本身不需要它。以前它落在 isSubset 之外，整次读屏被拒，报的还是
+      // 「不提供隐藏后台屏幕操控」——彻底误导，看着像通道坏了。
+      allowed = ["image", "detail", "background", "screen", "observation"]
       try optionalBool("image"); try optionalBool("detail"); try optionalBool("background")
+      try optionalString("screen", limit: 96); try optionalString("observation", limit: 96)
     case .tap:
       allowed = ["screen", "id", "long"]
       _ = try requiredString("screen", limit: 96); _ = try integer("id", in: 1...400); try optionalBool("long")
@@ -78,7 +84,14 @@ struct IOSPhoneOperation {
         throw IOSPhoneOperationError(message: "iOS 只支持 back、home、notifications；要切应用请用 open。")
       }
     }
-    guard Set(parameters.keys).isSubset(of: allowed), parameters["background"] as? Bool != true else {
+    // 校验要分开报：真正传了 background 才是「后台屏」那件事；其它多余的键
+    // 必须点名是哪个键，否则任何参数错误都会显示成同一句误导文案。
+    let extra = Set(parameters.keys).subtracting(allowed)
+    if !extra.isEmpty {
+      throw IOSPhoneOperationError(
+        message: "参数含不支持的选项：\(extra.sorted().joined(separator: "、"))。")
+    }
+    guard parameters["background"] as? Bool != true else {
       throw IOSPhoneOperationError(message: "参数含不支持的选项；iOS 不提供隐藏后台屏幕操控。")
     }
   }
