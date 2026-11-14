@@ -348,35 +348,47 @@ static int DshRenderDisplay(const char *outPath) {
   void *ca = dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
   if (!iosurf || !ca) { printf("ERR framework\n"); return 2; }
 
+  // IOSurface 的调用约定必须严格照抄：
+  //   IOSurfaceCreate(CFDictionaryRef) -> IOSurfaceRef
+  //   IOSurfaceLock(surface, options, uint32_t *seed) -> kern_return_t
+  //   IOSurfaceGetBaseAddress(surface) -> void *
+  //   IOSurfaceGetBytesPerRow(surface) -> size_t
+  //   IOSurfaceUnlock(surface, options, uint32_t *seed) -> kern_return_t
+  //
+  // 早先我把 lock 写成 (surface, opts, void **base, size_t *stride)，
+  // 那是错的：base 从来没被赋值，memcpy 从野指针读，直接 SIGSEGV。
   typedef void *(*CreateFn)(CFDictionaryRef);
   CreateFn surfaceCreate = (CreateFn)dlsym(iosurf, "IOSurfaceCreate");
-  typedef int (*LockFn)(void *, uint32_t, void **, size_t *);
+  typedef int (*LockFn)(void *, uint32_t, uint32_t *);
   LockFn surfaceLock = (LockFn)dlsym(iosurf, "IOSurfaceLock");
-  typedef int (*UnlockFn)(void *, uint32_t, void *);
+  typedef int (*UnlockFn)(void *, uint32_t, uint32_t *);
   UnlockFn surfaceUnlock = (UnlockFn)dlsym(iosurf, "IOSurfaceUnlock");
-  typedef size_t (*GetPropFn)(void *, uint32_t);
-  GetPropFn getProp = (GetPropFn)dlsym(iosurf, "IOSurfaceGetPropertyMaximum");
+  typedef void *(*BaseAddrFn)(void *);
+  BaseAddrFn getBase = (BaseAddrFn)dlsym(iosurf, "IOSurfaceGetBaseAddress");
+  typedef size_t (*BPRFn)(void *);
+  BPRFn getBPR = (BPRFn)dlsym(iosurf, "IOSurfaceGetBytesPerRow");
 
   typedef void (*RenderFn)(int, CFStringRef, void *);
   RenderFn render = (RenderFn)dlsym(ca, "CARenderServerRenderDisplay");
 
-  if (!surfaceCreate || !surfaceLock || !surfaceUnlock) {
-    printf("ERR IOSurface 符号缺失\n");
+  if (!surfaceCreate || !surfaceLock || !surfaceUnlock || !getBase || !getBPR) {
+    printf("ERR IOSurface 符号缺失 create=%d lock=%d unlock=%d base=%d bpr=%d\n",
+           surfaceCreate != NULL, surfaceLock != NULL, surfaceUnlock != NULL,
+           getBase != NULL, getBPR != NULL);
     return 2;
   }
   if (!render) {
     printf("ERR CARenderServerRenderDisplay 缺失\n");
     return 2;
   }
-  (void)getProp;
 
-  // BGRA（'BGRA' = 0x42475241），每像素 4 字节。
   int bpr = W * 4;
+  int four = 4;
+  int fmt = 0x42475241;   // 'BGRA'
   CFNumberRef nW = CFNumberCreate(NULL, kCFNumberIntType, &W);
   CFNumberRef nH = CFNumberCreate(NULL, kCFNumberIntType, &H);
-  CFNumberRef nBPE = CFNumberCreate(NULL, kCFNumberIntType, &(int){4});
+  CFNumberRef nBPE = CFNumberCreate(NULL, kCFNumberIntType, &four);
   CFNumberRef nBPR = CFNumberCreate(NULL, kCFNumberIntType, &bpr);
-  int fmt = 0x42475241;
   CFNumberRef nFmt = CFNumberCreate(NULL, kCFNumberIntType, &fmt);
 
   const void *keys[] = { CFSTR("IOSurfaceWidth"), CFSTR("IOSurfaceHeight"),
@@ -392,45 +404,54 @@ static int DshRenderDisplay(const char *outPath) {
 
   render(0, CFSTR("LCD"), surface);
 
-  void *base = NULL;
-  size_t stride = 0;
-  if (surfaceLock(surface, 0, &base, &stride) != 0) {
-    printf("ERR lock\n");
+  uint32_t seed = 0;
+  int lockRC = surfaceLock(surface, 0, &seed);
+  if (lockRC != 0) { printf("ERR lock rc=%d\n", lockRC); return 2; }
+
+  void *base = getBase(surface);
+  size_t stride = getBPR(surface);
+  if (!base) {
+    surfaceUnlock(surface, 0, &seed);
+    printf("ERR base=NULL stride=%zu\n", stride);
     return 2;
   }
   if (stride == 0) stride = (size_t)bpr;
 
-  // 拷一份出来再解锁，避免 PNG 编码期间 surface 被改。
   size_t bytes = stride * (size_t)H;
   unsigned char *copy = malloc(bytes);
-  if (!copy) { surfaceUnlock(surface, 0, NULL); printf("ERR malloc\n"); return 2; }
+  if (!copy) {
+    surfaceUnlock(surface, 0, &seed);
+    printf("ERR malloc %zu\n", bytes);
+    return 2;
+  }
   memcpy(copy, base, bytes);
-  surfaceUnlock(surface, 0, NULL);
+  surfaceUnlock(surface, 0, &seed);
 
-  // BGRA → CGImage
+  // 抽样判黑：全 0 说明没渲染出内容（通常是权限不足）。
+  int nonZero = 0;
+  for (size_t k = 0; k < bytes; k += 4001) {
+    if (copy[k]) { nonZero++; if (nonZero > 50) break; }
+  }
+
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
   CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, copy, bytes, NULL);
   CGImageRef img = CGImageCreate((size_t)W, (size_t)H, 8, 32, stride, cs,
       kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
       provider, NULL, false, kCGRenderingIntentDefault);
   if (!img) {
-    printf("ERR CGImageCreate\n");
+    printf("ERR CGImageCreate (非零采样=%d)\n", nonZero);
     CGDataProviderRelease(provider);
     CGColorSpaceRelease(cs);
+    free(copy);
     return 2;
-  }
-
-  // 判黑：抽样看是否全 0
-  int nonZero = 0;
-  for (size_t i = 0; i < bytes; i += 4001) {
-    if (copy[i]) { nonZero++; if (nonZero > 50) break; }
   }
 
   CFMutableDataRef png = CFDataCreateMutable(NULL, 0);
   CGImageDestinationRef dest = CGImageDestinationCreateWithData(png, CFSTR("public.png"), 1, NULL);
   if (!dest) {
     printf("ERR dest\n");
-    CGImageRelease(img); CGDataProviderRelease(provider); CGColorSpaceRelease(cs);
+    CGImageRelease(img); CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs); free(copy);
     return 2;
   }
   CGImageDestinationAddImage(dest, img, NULL);
@@ -439,13 +460,13 @@ static int DshRenderDisplay(const char *outPath) {
   CGImageRelease(img);
   CGDataProviderRelease(provider);
   CGColorSpaceRelease(cs);
+  free(copy);
 
   if (!ok) { printf("ERR png finalize\n"); return 2; }
 
   NSString *path = [NSString stringWithUTF8String:outPath];
-  CFDataRef plain = (CFDataRef)png;
-  BOOL wrote = [(__bridge NSData *)plain writeToFile:path atomically:NO];
-  CFIndex len = CFDataGetLength(plain);
+  BOOL wrote = [(__bridge NSData *)png writeToFile:path atomically:NO];
+  CFIndex len = CFDataGetLength(png);
   CFRelease(png);
   if (!wrote) { printf("ERR write %s\n", outPath); return 2; }
 
