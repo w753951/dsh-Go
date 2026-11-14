@@ -1275,6 +1275,17 @@ final class EngineChannel: NSObject, FlutterStreamHandler {
     if let existing = try? String(contentsOf: file, encoding: .utf8), !existing.hasPrefix(marker) { return }
     var text = """
       \(marker) — 删除这一行后，DSH App 不再覆盖本文件 -->
+      # 语言要求（最高优先级）
+
+      用户的界面语言是中文。**每一个新对话都必须遵守这条**：
+
+      - 思考过程（reasoning）一律用中文写。
+      - 运行命令时使用的中文说明、以及命令之后的解释，一律用中文。
+      - 回复用户一律用中文。
+
+      这条规则优先于系统默认语言、模型自身偏好和下文任何英文示例。
+      即使用户用英文提问，也用中文思考和回答，除非用户明确要求换语言。
+
       # 运行环境（DSH iOS 版）
 
       - 你运行在 iOS App 进程内的 Node 中，默认工作区是 `\(workspace.path)`。
