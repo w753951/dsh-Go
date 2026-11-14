@@ -3,7 +3,9 @@
 <plist version="1.0">
 <dict>
 	<!-- dshtool 以 root 从 sshd 启动，需要平台级授权才能：
-	     1) 用 UIGetScreenImage 拿到整个屏幕（沙盒进程只能拿到自己）
+	     1) 用 CARenderServerRenderDisplay 把整个显示器渲染到 IOSurface
+	        —— 这一条要 com.apple.QuartzCore.global-capture，
+	        没有它函数调用会"成功"但渲染出纯黑图（实测踩过）
 	     2) 向系统 HID 事件流派发点按与滑动 -->
 	<key>platform-application</key>
 	<true/>
@@ -12,6 +14,24 @@
 	<key>com.apple.private.hid.client.event-dispatch</key>
 	<true/>
 	<key>com.apple.springboard.launchapplications</key>
+	<true/>
+
+	<!-- CoreAnimation 渲染服务：整屏捕获 -->
+	<key>com.apple.QuartzCore.global-capture</key>
+	<true/>
+	<key>com.apple.QuartzCore.displayable-context</key>
+	<true/>
+	<key>com.apple.QuartzCore.system-layers</key>
+	<true/>
+	<key>com.apple.QuartzCore.cache-asynchronous</key>
+	<true/>
+
+	<!-- IOSurface：拿渲染目标的底层缓冲 -->
+	<key>com.apple.private.iosurface</key>
+	<true/>
+	<key>com.apple.private.IOSurface.set-surface-data</key>
+	<true/>
+	<key>com.apple.private.surface-accelerator</key>
 	<true/>
 </dict>
 </plist>
