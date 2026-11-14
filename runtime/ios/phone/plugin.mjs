@@ -28,6 +28,34 @@ export function systemAnswer(system, name, args, answer) {
 // 手机是越狱机，sshd 默认就是 root/alpine；用户在设置里改过才会不同。
 const SHELL_DEFAULT = Object.freeze({ host: '127.0.0.1', port: 22, username: 'root', password: 'alpine' });
 const SHELL_TIMEOUT_MAX = 120_000;
+// 端口回退：iOS 沙盒可能拒绝连接特权端口（22）。越狱机的 sshd 常常同时在
+// 几个端口上监听，这里按顺序试一遍，把能用的那个记下来，后续调用直接用。
+// 只在用户没显式配置过端口时才启用回退——显式配置说明他知道自己要连哪里。
+const SHELL_PORT_CANDIDATES = [22, 2222, 8022, 22222];
+let learnedShellPort = null;
+let portProbe = null;
+
+// 探测一次并缓存。并发调用共用同一个探测，避免每次工具调用都多等几轮超时。
+async function resolveShellConfig() {
+  const config = await readShellConfig();
+  if (config.port !== SHELL_DEFAULT.port) return config;
+  if (learnedShellPort) return { ...config, port: learnedShellPort };
+  if (portProbe) return portProbe();
+  portProbe = async () => {
+    for (const port of SHELL_PORT_CANDIDATES) {
+      try {
+        await sshExec({ ...config, port, command: 'true', timeoutMs: 6000 });
+        learnedShellPort = port;
+        return { ...config, port };
+      } catch { /* 这个端口不行，试下一个 */ }
+    }
+    portProbe = null;   // 全都不行，下次重新探测
+    return config;
+  };
+  return portProbe();
+}
+
+
 const SHELL_OUTPUT_BYTES = 24 * 1024;
 
 function shellConfigPath() {
@@ -125,7 +153,7 @@ async function openViaSsh(args, execution) {
   const signal = execution?.signal;
   if (signal?.aborted) return shellText('ERR_IOS_PHONE_CANCELLED: 调用已取消，没有执行。', true);
 
-  const config = await readShellConfig();
+  const config = await resolveShellConfig();
   try {
     const result = await sshExec({
       ...config,
@@ -166,7 +194,7 @@ async function shellCall(args, execution) {
   const signal = execution?.signal;
   if (signal?.aborted) return shellText('ERR_IOS_PHONE_CANCELLED: 调用已取消，没有执行。', true);
 
-  const config = await readShellConfig();
+  const config = await resolveShellConfig();
   try {
     const result = await sshExec({ ...config, command, timeoutMs });
     const parts = [];
