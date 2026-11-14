@@ -903,22 +903,67 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     }
   }
 
-  private func capture() -> Outcome {
-    guard let image = screenImage() else {
-      return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
+  /// 读相册里最新的整屏截图。
+  ///
+  /// App 在沙盒里调 `UIGetScreenImage` 只能拿到自己的图层，截出来是黑的；
+  /// 越狱机上装的 NiceBarX 把「状态栏电池单击」绑到了「DSH截图」快捷指令，
+  /// 那条路在 SpringBoard 内部跑，能把**整屏**存进相册。所以这里退一步去读
+  /// 相册的最新文件——绕开沙盒，也绕开 HID。
+  ///
+  /// 只认 `maxAge` 秒内的文件：读屏要的是「当前屏幕」，拿一张几分钟前的旧图
+  /// 当现状会让模型对着过期画面下判断。
+  private func latestAlbumScreenshot(maxAge: TimeInterval = 120) -> UIImage? {
+    let fm = FileManager.default
+    let root = "/var/mobile/Media/DCIM"
+    guard let dirs = try? fm.contentsOfDirectory(atPath: root) else { return nil }
+    let cutoff = Date().addingTimeInterval(-maxAge)
+    var best: (path: String, date: Date)?
+    for dir in dirs {
+      let sub = (root as NSString).appendingPathComponent(dir)
+      guard let files = try? fm.contentsOfDirectory(atPath: sub) else { continue }
+      for name in files {
+        let lower = name.lowercased()
+        guard lower.hasSuffix(".png") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") else { continue }
+        let full = (sub as NSString).appendingPathComponent(name)
+        guard let attrs = try? fm.attributesOfItem(atPath: full),
+          let mtime = attrs[.modificationDate] as? Date, mtime > cutoff else { continue }
+        if best == nil || mtime > best!.date { best = (full, mtime) }
+      }
     }
-    // 纯黑图说明没有拿到屏幕内容（缺平台级权限时 UIGetScreenImage 会给全黑）。
-    // 以前这种图会被当成成功结果交上去，模型只能说「屏幕是黑的」，排查方向
-    // 全错。这里直接报清楚原因，并说明是哪一种。
-    if Self.isBlank(image) {
+    guard let hit = best else { return nil }
+    return UIImage(contentsOfFile: hit.path)
+  }
+
+  private func capture() -> Outcome {
+    // 两条路：沙盒内直接截屏（有平台权限时有效），以及读相册最新截图
+    // （NiceBarX + DSH截图 快捷指令产出的整屏）。后者在越狱机上更可靠。
+    var image = screenImage()
+    var viaAlbum = false
+    // 直接截屏拿不到（或只拿到黑图）时，退回相册里刚生成的那张整屏。
+    let directBlank = image.map { Self.isBlank($0) } ?? true
+    if directBlank {
+      if let album = latestAlbumScreenshot(), !Self.isBlank(album) {
+        image = album
+        viaAlbum = true
+      }
+    }
+    guard let shot = image else {
+      return Outcome(status: 1, metadata: Self.json([
+        "outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE",
+        "hint": "单击一次状态栏的电池图标，让 DSH截图 存一张整屏，再读。",
+      ]), bytes: nil)
+    }
+    // 纯黑图说明没拿到屏幕内容（缺平台级权限时 UIGetScreenImage 会给全黑）。
+    if Self.isBlank(shot) {
       let reason = Self.hasPlatformEntitlement
         ? "ERR_PHONE_JAILBREAK_CAPTURE"
         : "ERR_PHONE_SCREEN_DENIED"
       return Outcome(status: 1, metadata: Self.json([
         "outcome": "notSent", "code": reason,
+        "hint": "单击一次状态栏的电池图标，让 DSH截图 存一张整屏，再读。",
       ]), bytes: nil)
     }
-    guard let png = image.pngData() else {
+    guard let png = shot.pngData() else {
       return Outcome(status: 1, metadata: Self.json(["outcome": "notSent", "code": "ERR_PHONE_JAILBREAK_CAPTURE"]), bytes: nil)
     }
     lock.lock()
@@ -928,16 +973,17 @@ final class IOSJailbreakDevice: @unchecked Sendable {
     let frameID = UUID().uuidString
     lastFrameID = frameID
     lock.unlock()
-    let w = Int(image.size.width * image.scale)
-    let h = Int(image.size.height * image.scale)
+    let w = Int(shot.size.width * shot.scale)
+    let h = Int(shot.size.height * shot.scale)
     // 上层解析读屏结果时必须有 interfaceOrientation，缺了会直接判失败。
     let orientation = UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .first?.interfaceOrientation.rawValue ?? 1
-    let meta: [String: Any] = ["outcome": "read", "kind": "screenshot",
-                              "width": w, "height": h, "nativeFrameId": frameID,
-                              "interfaceOrientation": orientation,
-                              "contentType": "image/png"]
+    var meta: [String: Any] = ["outcome": "read", "kind": "screenshot",
+                               "width": w, "height": h, "nativeFrameId": frameID,
+                               "interfaceOrientation": orientation,
+                               "contentType": "image/png"]
+    if viaAlbum { meta["source"] = "album" }
     return Outcome(status: 0, metadata: Self.json(meta), bytes: png)
   }
 
