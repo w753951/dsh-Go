@@ -66,6 +66,17 @@ jobs:
           # 未签名的 arm64e 一加载就崩。所以必须：双切片 + lipo 合并 + ldid 签名。
           # ldid 重签会重做 PAC 重定位，这是它能安全加载的关键。
           LLDID_T="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
+          # 关键：只链接 Foundation。
+          #
+          # arm64e 上，dylib 对「链接进来」的 ObjC/CG 符号会生成需要指针认证
+          # （PAC）的 chained fixup。未正确签名时，SpringBoard 在 libobjc 加载
+          # 阶段就崩，崩溃日志写 "possible pointer authentication failure"。
+          #
+          # 实测：只链 Foundation 的探针能稳定注入；链了 UIKit + CoreGraphics
+          # 的截图服务会直接把手机打进安全模式。
+          #
+          # 所以 UIKit / CoreGraphics / ImageIO 全部改成运行时 dlopen + dlsym，
+          # 链接期一个都不留。这也是 DshProbe 现在能截图的原因。
           build_tweak() {
             local name="$1" src="$2" opt="$3"
             local out="build/Library/MobileSubstrate/DynamicLibraries/$name"
@@ -81,8 +92,6 @@ jobs:
                 -fobjc-arc \
                 "$opt" \
                 -framework Foundation \
-                -framework UIKit \
-                -framework CoreGraphics \
                 -o "${out}.${arch}" "$src" || ok=0
             done
             if [ "$ok" = "1" ] && [ -f "${out}.arm64e" ]; then
@@ -95,18 +104,23 @@ jobs:
             fi
             echo "=== $name 架构 ==="
             lipo -info "$out"
-            # 签名必须在 lipo 之后：签名写进 Mach-O，合并会破坏它。
-            if "$LLDID_T" -S "$out" 2>/dev/null; then
-              echo "$name 已签名"
-            else
-              echo "::warning title=ldid::$name 签名失败"
-            fi
-            od -A d -t x1 -N 4 "$out"
+            # 检查链接的库：只应有 Foundation / libSystem
+            echo "--- $name 依赖 ---"
+            otool -L "$out" | head -12
           }
 
-          build_tweak DshScreenshotService.dylib jbplugin/DshScreenshotService.m -O2
+          # DshProbe 只链接 Foundation（全动态加载 UIKit/CG），可以安全注入。
           build_tweak DshProbe.dylib jbplugin/DshProbe.m -O1
-          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/
+          cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
+
+          # DshScreenshotService 仍然静态链接 UIKit，实测会让 SpringBoard 崩溃
+          # 进安全模式。保留源码和构建但不打包，等它改成全动态再说。
+          if [ "${DSH_BUILD_SERVICE:-0}" = "1" ]; then
+            build_tweak DshScreenshotService.dylib jbplugin/DshScreenshotService.m -O2
+          else
+            echo "跳过 DshScreenshotService（静态链接 UIKit 会 PAC 崩）"
+          fi
+
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
 
           cp jbplugin/control build/DEBIAN/control
