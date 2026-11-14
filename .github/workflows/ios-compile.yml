@@ -149,10 +149,10 @@ jobs:
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
-          # HID 用于读屏与点按，launchapplications 用于打开其它 App。
-          # 刻意不带 no-sandbox：那个变体（ent-jailbreak.plist）在 XinaA15 上
-          # 会被 TrollStore 直接拒绝安装，连旧版一起卸掉。
-          ent="app/ios/Runner/ent-launch.plist"
+          # platform-application 是整屏截图的前提（否则 UIGetScreenImage 只给全黑），
+          # HID 用于点按与滑动，launchapplications 用于打开其它 App。
+          # 刻意不带 no-sandbox：那个变体在 XinaA15 上会被 TrollStore 拒装。
+          ent="app/ios/Runner/ent-platform.plist"
           test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
           echo "Frameworks embedded:"; ls "$app/Frameworks"
           echo "built-in plugin:"; du -sh "$app/builtin-plugins" 2>/dev/null || echo none
@@ -161,7 +161,7 @@ jobs:
           "$LLDID" -S"$ent" "$app/Runner"
           echo "=== entitlements ==="
           "$LLDID" -e "$app/Runner"
-          for key in hid.client.event-dispatch springboard.launchapplications; do
+          for key in platform-application hid.client.event-dispatch springboard.launchapplications; do
             "$LLDID" -e "$app/Runner" | grep -q "$key" \
               || { echo "::error title=entitlements::$key did not land"; exit 1; }
           done
