@@ -149,11 +149,10 @@ jobs:
           brew install ldid || true
           LLDID="$(command -v ldid || echo /opt/homebrew/bin/ldid)"
           app="app/build/ios/iphoneos/Runner.app"
-          # 只签 HID 授权。带 no-sandbox 的变体（ent-jailbreak.plist）在 XinaA15 上
-          # 会被 TrollStore 直接拒绝安装，连旧版一起卸掉，所以不用它。
-          # 读屏本身不需要它：越狱通道的抓屏在沙盒里就能出图，
-          # 之前读屏失败是帧号不是 UUID（已在 IOSPhoneCoreDevice 修掉）。
-          ent="app/ios/Runner/ent-hidonly.plist"
+          # HID 用于读屏与点按，launchapplications 用于打开其它 App。
+          # 刻意不带 no-sandbox：那个变体（ent-jailbreak.plist）在 XinaA15 上
+          # 会被 TrollStore 直接拒绝安装，连旧版一起卸掉。
+          ent="app/ios/Runner/ent-launch.plist"
           test -f "$ent" || { echo '::error title=entitlements::missing'; exit 1; }
           echo "Frameworks embedded:"; ls "$app/Frameworks"
           echo "built-in plugin:"; du -sh "$app/builtin-plugins" 2>/dev/null || echo none
@@ -162,8 +161,10 @@ jobs:
           "$LLDID" -S"$ent" "$app/Runner"
           echo "=== entitlements ==="
           "$LLDID" -e "$app/Runner"
-          "$LLDID" -e "$app/Runner" | grep -q 'hid.client.event-dispatch' \
-            || { echo '::error title=entitlements::hid entitlement did not land'; exit 1; }
+          for key in hid.client.event-dispatch springboard.launchapplications; do
+            "$LLDID" -e "$app/Runner" | grep -q "$key" \
+              || { echo "::error title=entitlements::$key did not land"; exit 1; }
+          done
           rm -rf "$RUNNER_TEMP/ip"; mkdir -p "$RUNNER_TEMP/ip/Payload"
           cp -R "$app" "$RUNNER_TEMP/ip/Payload/"
           (cd "$RUNNER_TEMP/ip" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/DSH-Go.ipa")
