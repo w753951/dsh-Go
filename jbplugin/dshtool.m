@@ -7,6 +7,8 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
+#import <ImageIO/ImageIO.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <errno.h>
@@ -312,6 +314,145 @@ static int DshFrontmost(void) {
   return 0;
 }
 
+
+// ---------------------------------------------------------------------------
+// 用 CARenderServerRenderDisplay 直接抓整屏。
+//
+// UIGetScreenImage 在 root 进程里拿不到内容（它只在 GUI 进程里有意义），
+// 但 CoreAnimation 的 render server 有一个私有入口可以把当前显示内容渲染
+// 到一块 IOSurface 上，这个过程不关心调用者是谁。越狱机 root 直接可用。
+//
+// 这条路如果通了：SSH 敲一条命令就能截到真实屏幕——不用点电池、不用快捷
+// 指令、不用注入 SpringBoard。
+// ---------------------------------------------------------------------------
+
+static int DshRenderDisplay(const char *outPath) {
+  // 屏幕尺寸：优先用 MainScreen 的像素尺寸，拿不到就按 iPhone 13 Pro Max 兜底。
+  CGFloat scale = 3.0;
+  CGFloat wpt = 428, hpt = 926;
+  Class screenCls = NSClassFromString(@"UIScreen");
+  if (screenCls) {
+    id mainScreen = ((id (*)(id, SEL))objc_msgSend)(screenCls, sel_registerName("mainScreen"));
+    if (mainScreen) {
+      CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(mainScreen, sel_registerName("bounds"));
+      if (bounds.size.width > 0) { wpt = bounds.size.width; hpt = bounds.size.height; }
+      scale = ((CGFloat (*)(id, SEL))objc_msgSend)(mainScreen, sel_registerName("scale"));
+      if (scale <= 0) scale = 3.0;
+    }
+  }
+  int W = (int)(wpt * scale);
+  int H = (int)(hpt * scale);
+  printf("屏幕 %dx%d (%.0fx%.0f @%.0fx)\n", W, H, (double)wpt, (double)hpt, (double)scale);
+
+  void *iosurf = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_NOW);
+  void *ca = dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+  if (!iosurf || !ca) { printf("ERR framework\n"); return 2; }
+
+  typedef void *(*CreateFn)(CFDictionaryRef);
+  CreateFn surfaceCreate = (CreateFn)dlsym(iosurf, "IOSurfaceCreate");
+  typedef int (*LockFn)(void *, uint32_t, void **, size_t *);
+  LockFn surfaceLock = (LockFn)dlsym(iosurf, "IOSurfaceLock");
+  typedef int (*UnlockFn)(void *, uint32_t, void *);
+  UnlockFn surfaceUnlock = (UnlockFn)dlsym(iosurf, "IOSurfaceUnlock");
+  typedef size_t (*GetPropFn)(void *, uint32_t);
+  GetPropFn getProp = (GetPropFn)dlsym(iosurf, "IOSurfaceGetPropertyMaximum");
+
+  typedef void (*RenderFn)(int, CFStringRef, void *);
+  RenderFn render = (RenderFn)dlsym(ca, "CARenderServerRenderDisplay");
+
+  if (!surfaceCreate || !surfaceLock || !surfaceUnlock) {
+    printf("ERR IOSurface 符号缺失\n");
+    return 2;
+  }
+  if (!render) {
+    printf("ERR CARenderServerRenderDisplay 缺失\n");
+    return 2;
+  }
+  (void)getProp;
+
+  // BGRA（'BGRA' = 0x42475241），每像素 4 字节。
+  int bpr = W * 4;
+  CFNumberRef nW = CFNumberCreate(NULL, kCFNumberIntType, &W);
+  CFNumberRef nH = CFNumberCreate(NULL, kCFNumberIntType, &H);
+  CFNumberRef nBPE = CFNumberCreate(NULL, kCFNumberIntType, &(int){4});
+  CFNumberRef nBPR = CFNumberCreate(NULL, kCFNumberIntType, &bpr);
+  int fmt = 0x42475241;
+  CFNumberRef nFmt = CFNumberCreate(NULL, kCFNumberIntType, &fmt);
+
+  const void *keys[] = { CFSTR("IOSurfaceWidth"), CFSTR("IOSurfaceHeight"),
+                         CFSTR("IOSurfaceBytesPerElement"), CFSTR("IOSurfaceBytesPerRow"),
+                         CFSTR("IOSurfacePixelFormat") };
+  const void *vals[] = { nW, nH, nBPE, nBPR, nFmt };
+  CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 5,
+      &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+  void *surface = surfaceCreate(props);
+  CFRelease(props);
+  CFRelease(nW); CFRelease(nH); CFRelease(nBPE); CFRelease(nBPR); CFRelease(nFmt);
+  if (!surface) { printf("ERR IOSurfaceCreate\n"); return 2; }
+
+  render(0, CFSTR("LCD"), surface);
+
+  void *base = NULL;
+  size_t stride = 0;
+  if (surfaceLock(surface, 0, &base, &stride) != 0) {
+    printf("ERR lock\n");
+    return 2;
+  }
+  if (stride == 0) stride = (size_t)bpr;
+
+  // 拷一份出来再解锁，避免 PNG 编码期间 surface 被改。
+  size_t bytes = stride * (size_t)H;
+  unsigned char *copy = malloc(bytes);
+  if (!copy) { surfaceUnlock(surface, 0, NULL); printf("ERR malloc\n"); return 2; }
+  memcpy(copy, base, bytes);
+  surfaceUnlock(surface, 0, NULL);
+
+  // BGRA → CGImage
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, copy, bytes, NULL);
+  CGImageRef img = CGImageCreate((size_t)W, (size_t)H, 8, 32, stride, cs,
+      kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+      provider, NULL, false, kCGRenderingIntentDefault);
+  if (!img) {
+    printf("ERR CGImageCreate\n");
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+    return 2;
+  }
+
+  // 判黑：抽样看是否全 0
+  int nonZero = 0;
+  for (size_t i = 0; i < bytes; i += 4001) {
+    if (copy[i]) { nonZero++; if (nonZero > 50) break; }
+  }
+
+  CFMutableDataRef png = CFDataCreateMutable(NULL, 0);
+  CGImageDestinationRef dest = CGImageDestinationCreateWithData(png, CFSTR("public.png"), 1, NULL);
+  if (!dest) {
+    printf("ERR dest\n");
+    CGImageRelease(img); CGDataProviderRelease(provider); CGColorSpaceRelease(cs);
+    return 2;
+  }
+  CGImageDestinationAddImage(dest, img, NULL);
+  bool ok = CGImageDestinationFinalize(dest);
+  CFRelease(dest);
+  CGImageRelease(img);
+  CGDataProviderRelease(provider);
+  CGColorSpaceRelease(cs);
+
+  if (!ok) { printf("ERR png finalize\n"); return 2; }
+
+  NSString *path = [NSString stringWithUTF8String:outPath];
+  CFDataRef plain = (CFDataRef)png;
+  BOOL wrote = [(__bridge NSData *)plain writeToFile:path atomically:NO];
+  CFIndex len = CFDataGetLength(plain);
+  CFRelease(png);
+  if (!wrote) { printf("ERR write %s\n", outPath); return 2; }
+
+  printf("capture=OK %dx%d %ld 字节 非零采样=%d\n", W, H, (long)len, nonZero);
+  return nonZero > 0 ? 0 : 3;
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
@@ -391,6 +532,10 @@ int main(int argc, char *argv[]) {
         printf("capture=FAIL\n");
       }
       return 0;
+    }
+    if ([cmd isEqualToString:@"rendershot"]) {
+      if (argc < 3) { printf("用法: rendershot <path>\n"); return 64; }
+      return DshRenderDisplay(argv[2]);
     }
     if ([cmd isEqualToString:@"shot"]) {
       if (argc < 3) return 64;
