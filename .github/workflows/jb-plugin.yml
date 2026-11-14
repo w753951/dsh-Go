@@ -70,11 +70,19 @@ jobs:
           lipo -info build/Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/
           # 探针：极少代码，只写一行日志。用来单独验证注入机制是否接受我们的 dylib。
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 \
-            -isysroot "$SDK" -dynamiclib -fobjc-arc -O1 \
-            -framework Foundation \ \
-            -o build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib \
+          # 同样用数组，不写反斜杠续行：YAML 里续行容易被吃掉或变成字面量。
+          probe_args=(
+            -arch arm64
+            -miphoneos-version-min=15.0
+            -isysroot "$SDK"
+            -dynamiclib
+            -fobjc-arc
+            -O1
+            -framework Foundation
+            -o build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib
             jbplugin/DshProbe.m
+          )
+          xcrun --sdk iphoneos clang "${probe_args[@]}"
           cp jbplugin/DshScreenshotService.plist build/Library/MobileSubstrate/DynamicLibraries/DshProbe.plist
           echo "=== 探针 ==="
           file build/Library/MobileSubstrate/DynamicLibraries/DshProbe.dylib
