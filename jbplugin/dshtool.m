@@ -175,14 +175,15 @@ static int DshTapDiag(CGFloat x, CGFloat y, int durationMs) {
 }
 
 
-// 单次长按：一个 client，按下一次、等、抬起一次。
+// 单次长按：一个 client，按下 →（可选心跳）→ 抬起。
 //
-// 之前的两个错误：
-//   1) tap 走的 DshTapDiag 会循环 5 种 client，等于连点 5 次、每次间隔 0.4 秒，
-//      系统把它看成多次点击，永远不构成「长按」。
-//   2) 按住期间每 60ms 补一个「触摸中」事件，手一直发同位置事件反而不像真实
-//      按住——真实手指静止时系统是收不到事件的。
-// 现在恢复成最朴素的样子：按下 → 什么都不发 → 抬起。
+// 目标手势是 NiceBarX 绑的「状态栏右侧长按 → 运行 DSH截图 快捷指令」。
+// 它挂在 SpringBoard 的状态栏视图上，靠 UILongPressGestureRecognizer 识别。
+//
+// 只用 down/wait/up 时它不认：真实的持续触摸虽然不发 move，但 iOS 的触摸
+// 跟踪会给同一次触摸不断刷新时间戳，识别器靠这个判断「手指还在」。这里每
+// heartbeatMs 补一个同位置的 touchesMoved，把触摸「续」上，参数已经修正成
+// 真实的 touch=1 + isDisplayIntegrated=1，所以这些心跳是有效的。
 static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   if (!DshLoadIOKit()) { printf("IOKit fail\n"); return 2; }
   int hold = durationMs > 0 ? durationMs : 1200;
@@ -195,13 +196,23 @@ static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   gDispatch(client, down);
   CFRelease(down);
 
-  // 按住期间不派发任何事件：手指静止时系统本来就没有新事件。
-  usleep((useconds_t)hold * 1000);
+  // 心跳：每 80ms 一个同位置触摸事件，让识别器知道手指没离开。
+  // 少于 80ms 意义不大，多于 120ms 有些识别器会判成触摸丢失。
+  int elapsed = 0;
+  const int kBeat = 80;
+  while (elapsed + kBeat < hold) {
+    usleep(kBeat * 1000);
+    elapsed += kBeat;
+    CFTypeRef beat = DshMakeEvent(x, y, YES);
+    if (beat) { gDispatch(client, beat); CFRelease(beat); }
+  }
+  if (hold > elapsed) usleep((useconds_t)(hold - elapsed) * 1000);
 
   CFTypeRef up = DshMakeEvent(x, y, NO);
   if (up) { gDispatch(client, up); CFRelease(up); }
   CFRelease(client);
-  printf("长按 %dms 完成 (%g,%g)\n", hold, (double)x, (double)y);
+  printf("长按 %dms 完成 (%g,%g)，心跳 %d 次\n",
+         hold, (double)x, (double)y, elapsed / kBeat);
   return 0;
 }
 
