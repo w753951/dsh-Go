@@ -522,7 +522,9 @@ final class IOSPhoneCoreDevice: NSObject {
       ["read", "dispatched", "notSent", "uncertain"].contains(metadata.outcome ?? ""),
       metadata.code == nil || Self.safeCode(metadata.code) != nil,
       status == 0 || bytes == nil else {
-      Self.trace("protocol-reject outcome=\(metadata.outcome ?? "nil") code=\(metadata.code ?? "nil") status=\(status) bytes=\(bytes?.count ?? -1)")
+      // 这个分支里 metadata 已经不在作用域（guard 的绑定只在成功路径可见），
+      // 所以把原始文本记下来，足够看出是哪一条校验没过。
+      Self.trace("protocol-reject status=\(status) bytes=\(bytes?.count ?? -1)")
       pending.reply = .failure(.init(code: "ERR_PHONE_CORE_PROTOCOL", mayHaveActed: pending.mutating))
       run.pending = nil; stop(run); return
     }
