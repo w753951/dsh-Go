@@ -113,11 +113,25 @@ enum {
 static CFTypeRef DshMakeEventPhase(CGFloat x, CGFloat y, int phase) {
   if (!gCreate) return NULL;
   BOOL touched = phase != DshPhaseEnd;
-  // 只有这一个 eventMask 组合被验证过能用。
+  // 只有这一个 eventMask 组合被验证过能用：Range|Touch。
+  // 注意必须真的传下去——之前这里声明了 eventMask 却给 gCreate 硬编码 0，
+  // 等于所有事件都没有 Mask，系统全部丢弃，连点击都点不开。
   uint32_t eventMask = touched ? 0x03u : 0x00u;
   CFTypeRef e = gCreate(kCFAllocatorDefault, mach_absolute_time(),
-                        2, 0, 0, 0, 0, 0, 0, touched ? 1 : 0,
-                        (double)x, (double)y, 0, 0, 0, 0);
+                        2,              // transducerType: finger
+                        0,              // index
+                        0,              // identity
+                        eventMask,      // eventMask  ← 关键，不能是 0
+                        0,              // buttonMask
+                        0,              // x（坐标靠下面 SetFloat 修正）
+                        0,              // y
+                        touched ? 1 : 0, // z：这套参数布局里 touch 语义落在这里
+                        (double)x,      // tipPressure
+                        (double)y,      // barrelPressure
+                        0,              // twist
+                        0,              // range
+                        0,              // touch
+                        0);             // isDisplayIntegrated
   if (!e) return NULL;
   if (gSetFloat) {
     gSetFloat(e, 0x0C, (double)x);  // kIOHIDEventFieldDigitizerX
