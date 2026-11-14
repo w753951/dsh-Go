@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -143,12 +144,12 @@ static void DshHandleClient(int fd) {
   return shared;
 }
 
-- (void)start {
+- (void)startWithLog:(void (^)(NSString *))log {
   if (self.listenFD > 0) return;
   self.queue = dispatch_queue_create("dsh.screen.service", DISPATCH_QUEUE_SERIAL);
 
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return;
+  if (fd < 0) { log([NSString stringWithFormat:@"socket failed errno=%d\n", errno]); return; }
   int yes = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
@@ -160,14 +161,17 @@ static void DshHandleClient(int fd) {
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
   if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    log([NSString stringWithFormat:@"bind failed errno=%d\n", errno]);
     close(fd);
     return;
   }
   if (listen(fd, 8) < 0) {
+    log([NSString stringWithFormat:@"listen failed errno=%d\n", errno]);
     close(fd);
     return;
   }
   self.listenFD = fd;
+  log([NSString stringWithFormat:@"listening on 127.0.0.1:%d\n", kDshScreenPort]);
 
   dispatch_async(self.queue, ^{
     while (YES) {
@@ -187,10 +191,26 @@ static void DshHandleClient(int fd) {
 __attribute__((constructor))
 static void DshScreenshotServiceInit(void) {
   @autoreleasepool {
-    // 等 SpringBoard 的 UI 起来再开监听，太早拿不到屏幕。
+    // 构造函数一进来就落一行日志。这是判断「插件到底有没有被注入」的唯一
+    // 可靠手段：端口不通可能是 bind 失败、也可能是根本没被加载，两者要分开。
+    NSMutableString *step = [NSMutableString string];
+    [step appendString:@"constructor entered\n"];
+    NSString *logPath = @"/var/mobile/dsh-screen-plugin.log";
+    void (^log)(NSString *) = ^(NSString *line) {
+      NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+      if (!handle) {
+        [line writeToFile:logPath atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+      } else {
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+      }
+    };
+    log([step copy]);
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-      [[DshScreenshotService shared] start];
+      [[DshScreenshotService shared] startWithLog:log];
     });
   }
 }
