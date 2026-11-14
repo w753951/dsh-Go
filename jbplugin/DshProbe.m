@@ -1,28 +1,26 @@
 //
-// DshProbe.m —— SpringBoard 内的探针（分步验证版）
+// DshProbe.m —— SpringBoard 内 HID 点击探针
 //
-// 目标：在 SpringBoard 进程内抓到整屏。
+// 核心思路：HID 事件只有在 UI 主进程里发出才会被系统接受。
+// root shell 里调 IOHIDEventSystemClientDispatchEvent 一直是"派发成功但零效果"，
+// 因为事件来源不被信任。而 SpringBoard 本身就是 UI 主进程——注入进去再点，
+// 这条限制就不存在了。
 //
-// 已经确认的边界：
-//   - 只链 Foundation 的 dylib 能稳定注入（双切片 arm64+arm64e）
-//   - 静态链接 UIKit/CoreGraphics 会在 libobjc 加载期 PAC 崩
-//   - UIGetScreenImage 一调用就让 SpringBoard 崩（废弃 API，iOS 15 不可用）
+// 验证目标：在 SpringBoard 内点击状态栏电池位置 (383, 21)，
+// 触发 NiceBarX 绑定的「DSH截图」快捷指令，让截图落进相册。
 //
-// 所以这里换路：用 objc_msgSend 运行时调 UIApplication / UIWindow，让
-// SpringBoard 渲染自己的视图层级。全程零静态 UIKit 符号。
-//
-// 每一步都写日志。如果崩溃，最后一条日志就是崩溃点，不用猜。
+// 为什么这条路比截图 API 安全：
+//   已确认 UIGetScreenImage 一调就让 SpringBoard 崩；
+//   而 HID 的 create/dispatch 在 root 进程里反复调过几十次都没崩，
+//   只是没生效。所以风险低得多。
 //
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <objc/runtime.h>
-#import <objc/message.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdarg.h>
-#include <string.h>
-#include <stdlib.h>
+#include <mach/mach_time.h>
 
 static NSString *const kLogPath = @"/var/mobile/dsh-probe.log";
 
@@ -42,135 +40,84 @@ static void DshLog(NSString *fmt, ...) {
   }
 }
 
-// 分步执行，每步写日志。返回 YES 表示走到这一步还没崩。
-typedef BOOL (*StepFn)(NSString **detail);
+#pragma mark - IOKit 符号
 
-static void DshRunStep(const char *name, StepFn fn) {
-  DshLog(@"[step] %s ...\n", name);
-  NSString *detail = nil;
-  BOOL ok = NO;
-  @try {
-    ok = fn(&detail);
-  } @catch (NSException *e) {
-    DshLog(@"[step] %s EXCEPTION %@: %@\n", name, e.name, e.reason);
-    return;
-  }
-  DshLog(@"[step] %s -> %s %@\n", name, ok ? "ok" : "fail",
-         detail ? detail : @"");
+typedef CFTypeRef (*CreateDigitizerFn)(CFAllocatorRef, uint64_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t,
+    double, double, double, double, uint32_t, uint32_t);
+typedef void (*SetFloatFn)(CFTypeRef, uint32_t, double);
+typedef CFTypeRef (*SystemCreateFn)(CFAllocatorRef);
+typedef void (*DispatchFn)(CFTypeRef, CFTypeRef);
+typedef void (*SetPropFn)(CFTypeRef, CFStringRef, CFTypeRef);
+
+static CreateDigitizerFn gCreate = NULL;
+static SetFloatFn gSetFloat = NULL;
+static SystemCreateFn gSysCreate = NULL;
+static DispatchFn gDispatch = NULL;
+static SetPropFn gSetProp = NULL;
+
+static BOOL DshLoadIOKit(void) {
+  if (gDispatch && gCreate) return YES;
+
+  // IOKit 是私有框架；SpringBoard 里它通常已经加载，先试 RTLD_DEFAULT。
+  void *h = dlopen("/System/Library/PrivateFrameworks/IOKit.framework/IOKit",
+                   RTLD_NOW | RTLD_GLOBAL);
+  if (!h) h = RTLD_DEFAULT;
+
+  gCreate = (CreateDigitizerFn)dlsym(h, "IOHIDEventCreateDigitizerEvent");
+  gSetFloat = (SetFloatFn)dlsym(h, "IOHIDEventSetFloatValue");
+  gSysCreate = (SystemCreateFn)dlsym(h, "IOHIDEventSystemClientCreate");
+  gDispatch = (DispatchFn)dlsym(h, "IOHIDEventSystemClientDispatchEvent");
+  gSetProp = (SetPropFn)dlsym(h, "IOHIDEventSystemClientSetProperty");
+
+  DshLog(@"iokit create=%d setfloat=%d syscreate=%d dispatch=%d setprop=%d\n",
+         gCreate != NULL, gSetFloat != NULL, gSysCreate != NULL,
+         gDispatch != NULL, gSetProp != NULL);
+  return gCreate && gDispatch && gSysCreate;
 }
 
-#pragma mark - 步骤 1：能否拿到 UIApplication
-
-static BOOL StepApplication(NSString **detail) {
-  void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
-  if (!uikit) { *detail = @"dlopen UIKit 失败"; return NO; }
-  DshLog(@"  UIKit handle=%p\n", uikit);
-
-  Class appCls = NSClassFromString(@"UIApplication");
-  if (!appCls) { *detail = @"UIApplication 类不存在"; return NO; }
-  DshLog(@"  UIApplication class=%p\n", (__bridge void *)appCls);
-
-  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
-  DshLog(@"  sharedApplication=%p\n", (__bridge void *)app);
-  if (!app) { *detail = @"sharedApplication 为 nil"; return NO; }
-
-  *detail = [NSString stringWithFormat:@"app=%p", (__bridge void *)app];
-  return YES;
+static CFTypeRef DshMakeEvent(CGFloat x, CGFloat y, BOOL touched) {
+  if (!gCreate) return NULL;
+  // 唯一验证过能被系统接受的组合：touched 时 Range|Touch（0x03），抬起 0。
+  // 加 Start/Stop/Position 位会让整条注入失效（在 root 进程里实测过）。
+  uint32_t mask = touched ? 0x03u : 0x00u;
+  CFTypeRef e = gCreate(kCFAllocatorDefault, mach_absolute_time(),
+                        2, 0, 0, mask, 0, 0, 0, touched ? 1 : 0,
+                        (double)x, (double)y, 0, 0, 0, 0);
+  if (!e) return NULL;
+  if (gSetFloat) {
+    gSetFloat(e, 0x0C, (double)x);  // kIOHIDEventFieldDigitizerX
+    gSetFloat(e, 0x0D, (double)y);  // kIOHIDEventFieldDigitizerY
+  }
+  return e;
 }
 
-#pragma mark - 步骤 2：能否拿到窗口
+// 在进程内点一下。看起来应该和 root 进程里的调用一样，
+// 区别只在"谁来发"——这里由 SpringBoard 自己发。
+static void DshTapInProcess(CGFloat x, CGFloat y, int holdMs) {
+  if (!DshLoadIOKit()) { DshLog(@"iokit 符号缺失，放弃\n"); return; }
 
-static BOOL StepWindow(NSString **detail) {
-  Class appCls = NSClassFromString(@"UIApplication");
-  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
-  if (!app) { *detail = @"app nil"; return NO; }
-
-  // SpringBoard 里 keyWindow 常常是 nil，改取 windows 里最靠前的。
-  id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
-  NSUInteger count = windows ? ((NSUInteger (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count")) : 0;
-  DshLog(@"  windows=%p count=%lu\n", (__bridge void *)windows, (unsigned long)count);
-  if (count == 0) { *detail = @"没有窗口"; return NO; }
-
-  id window = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
-      sel_registerName("objectAtIndex:"), count - 1);
-  DshLog(@"  window=%p class=%@\n", (__bridge void *)window,
-         ((id (*)(id, SEL))objc_msgSend)(window, sel_registerName("class")));
-
-  CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(window, sel_registerName("bounds"));
-  DshLog(@"  bounds=%.1f x %.1f\n", bounds.size.width, bounds.size.height);
-
-  *detail = [NSString stringWithFormat:@"%.0fx%.0f", bounds.size.width, bounds.size.height];
-  return YES;
-}
-
-#pragma mark - 步骤 3：渲染视图层级
-
-static BOOL StepRender(NSString **detail) {
-  Class appCls = NSClassFromString(@"UIApplication");
-  id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
-  id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
-  NSUInteger count = ((NSUInteger (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count"));
-  if (count == 0) { *detail = @"没有窗口"; return NO; }
-
-  // SpringBoard 的窗口层级有好几层（壁纸、图标、状态栏…）。
-  // 用最大的那个窗口做容器，把所有窗口依次画进去。
-  CGRect unionRect = CGRectZero;
-  for (NSUInteger i = 0; i < count; i++) {
-    id w = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
-        sel_registerName("objectAtIndex:"), i);
-    CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
-    if (b.size.width > unionRect.size.width) unionRect = b;
-  }
-  if (unionRect.size.width <= 0) { *detail = @"窗口尺寸为 0"; return NO; }
-
-  // UIGraphicsBeginImageContextWithOptions(size, opaque, scale) 是 C 函数，
-  // 通过 dlsym 取，避免任何静态符号。
-  void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_NOW);
-  typedef void (*BeginCtx)(CGSize, BOOL, CGFloat);
-  typedef id (*GetImage)(void);
-  typedef void (*EndCtx)(void);
-  BeginCtx begin = (BeginCtx)dlsym(uikit, "UIGraphicsBeginImageContextWithOptions");
-  GetImage getImage = (GetImage)dlsym(uikit, "UIGraphicsGetImageFromCurrentImageContext");
-  EndCtx end = (EndCtx)dlsym(uikit, "UIGraphicsEndImageContext");
-  if (!begin || !getImage || !end) {
-    *detail = @"图形上下文符号缺失";
-    return NO;
+  CFTypeRef client = gSysCreate(kCFAllocatorDefault);
+  if (!client) { DshLog(@"client 创建失败\n"); return; }
+  DshLog(@"client=%p\n", client);
+  if (gSetProp) {
+    gSetProp(client, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    DshLog(@"AllowInstrumentation 已设\n");
   }
 
-  begin(unionRect.size, NO, 0);
-  DshLog(@"  上下文已开 %.0fx%.0f\n", unionRect.size.width, unionRect.size.height);
+  CFTypeRef down = DshMakeEvent(x, y, YES);
+  if (!down) { DshLog(@"down 事件创建失败\n"); CFRelease(client); return; }
+  gDispatch(client, down);
+  CFRelease(down);
+  DshLog(@"已派发 down (%g,%g)\n", (double)x, (double)y);
 
-  for (NSUInteger i = 0; i < count; i++) {
-    id w = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(windows,
-        sel_registerName("objectAtIndex:"), i);
-    CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
-    @try {
-      typedef void (*DrawHierFn)(id, SEL, CGRect, BOOL);
-      DrawHierFn drawHier = (DrawHierFn)(void *)objc_msgSend;
-      drawHier(w, sel_registerName("drawViewHierarchyInRect:afterScreenUpdates:"), b, NO);
-      DshLog(@"  窗口 %lu 已绘制\n", (unsigned long)i);
-    } @catch (NSException *e) {
-      DshLog(@"  窗口 %lu 绘制异常 %@\n", (unsigned long)i, e.name);
-    }
-  }
+  int hold = holdMs > 0 ? holdMs : 120;
+  usleep((useconds_t)hold * 1000);
 
-  id image = getImage();
-  end();
-  DshLog(@"  图像=%p\n", (__bridge void *)image);
-  if (!image) { *detail = @"渲染结果为 nil"; return NO; }
-
-  // 转 PNG。UIImagePNGRepresentation 是 C 函数。
-  typedef id (*PngFn)(id);
-  PngFn toPng = (PngFn)dlsym(uikit, "UIImagePNGRepresentation");
-  if (!toPng) { *detail = @"PNG 符号缺失"; return NO; }
-  id data = toPng(image);
-  if (!data) { *detail = @"PNG 编码失败"; return NO; }
-
-  NSUInteger len = ((NSUInteger (*)(id, SEL))objc_msgSend)(data, sel_registerName("length"));
-  BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(data,
-      sel_registerName("writeToFile:atomically:"), @"/var/mobile/dsh-screen.png", NO);
-  *detail = [NSString stringWithFormat:@"png=%lu 字节 写入=%d", (unsigned long)len, ok];
-  return ok;
+  CFTypeRef up = DshMakeEvent(x, y, NO);
+  if (up) { gDispatch(client, up); CFRelease(up); }
+  CFRelease(client);
+  DshLog(@"已派发 up，共 %d ms\n", hold);
 }
 
 #pragma mark - 入口
@@ -181,15 +128,20 @@ static void DshProbeInit(void) {
     DshLog(@"=== loaded uid=%d pid=%d bundle=%@ ===\n",
            getuid(), getpid(), [[NSBundle mainBundle] bundleIdentifier]);
 
-    // 后台队列 + 8 秒：SpringBoard 启动期主队列排满，投 main queue 会一直不执行。
+    // 后台队列 + 8 秒：SpringBoard 启动期主队列排满，投 main queue 不会执行。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
       @autoreleasepool {
-        DshLog(@"timer fired\n");
-        DshRunStep("application", StepApplication);
-        DshRunStep("window", StepWindow);
-        DshRunStep("render", StepRender);
-        DshLog(@"=== all steps done ===\n");
+        DshLog(@"timer fired, start tapping\n");
+
+        // 电池图标在逻辑坐标 (383, 21)（实测：物理 x=1090..1183, y=53..97 @3x）。
+        // 分三次点，间隔几秒，方便从相册时间戳判断哪一次生效。
+        for (int i = 0; i < 3; i++) {
+          DshLog(@"--- 第 %d 次点击 ---\n", i + 1);
+          DshTapInProcess(383, 21, 120);
+          sleep(4);
+        }
+        DshLog(@"=== all taps done ===\n");
       }
     });
   }
