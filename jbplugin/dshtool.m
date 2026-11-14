@@ -183,6 +183,26 @@ static int DshHold(CGFloat x, CGFloat y, int durationMs) {
   return 0;
 }
 
+
+// 向 Darwin 通知中心发一条通知，让 Snapper3 自己截图。
+//
+// Snapper3 把动作挂在 CFNotificationCenterGetDarwinNotifyCenter 上，名字是
+// com.jontelang.snapper3.screenshot / .instant 等。这条路不需要任何手势，
+// 也不需要它对外开接口——系统通知总线本来就是公开的。
+//
+// 设备上没有 notifyutil，所以在这里直接调 CoreFoundation 发。
+static int DshSnapNotify(const char *name) {
+  if (!name || !*name) { printf("需要通知名\n"); return 64; }
+  CFStringRef key = CFStringCreateWithCString(kCFAllocatorDefault, name, kCFStringEncodingUTF8);
+  if (!key) { printf("名字无效\n"); return 64; }
+  CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+  if (!center) { printf("拿不到 Darwin 通知中心\n"); CFRelease(key); return 2; }
+  CFNotificationCenterPostNotification(center, key, NULL, NULL, true);
+  printf("已发送 %s\n", name);
+  CFRelease(key);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
@@ -224,6 +244,10 @@ int main(int argc, char *argv[]) {
     if ([cmd isEqualToString:@"tapdiag"]) {
       if (argc < 4) return 64;
       return DshTapDiag(atof(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 80);
+    }
+    if ([cmd isEqualToString:@"snapnotify"]) {
+      if (argc < 3) return 64;
+      return DshSnapNotify(argv[2]);
     }
     if ([cmd isEqualToString:@"hold"]) {
       if (argc < 4) return 64;
