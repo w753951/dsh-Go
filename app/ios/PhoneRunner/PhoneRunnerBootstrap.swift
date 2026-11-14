@@ -2,13 +2,57 @@ import Foundation
 import Security
 
 enum PhoneRunnerAppCatalog {
+  /// 常见应用的名字 → bundle id。
+  ///
+  /// 原来这里只认包名格式和「设置」，其余全靠调用方传进来的 apps 列表。
+  /// 但那个列表来自 LSApplicationWorkspace：沙盒里常常是空的，而且就算拿到了，
+  /// 系统语言是英文时名字是 "WeChat" 而不是「微信」——于是「打开微信」这种
+  /// 最基本的请求会一路 解析失败 → 报错，看着像通道坏了。
+  ///
+  /// 这张表是最后一道兜底，只放稳定的知名包名。
+  static let aliases: [(name: String, id: String)] = [
+    ("微信", "com.tencent.xin"), ("wechat", "com.tencent.xin"),
+    ("qq", "com.tencent.mqq"), ("腾讯qq", "com.tencent.mqq"),
+    ("支付宝", "com.alipay.iphoneclient"), ("alipay", "com.alipay.iphoneclient"),
+    ("淘宝", "com.taobao.taobao4iphone"), ("taobao", "com.taobao.taobao4iphone"),
+    ("高德地图", "com.autonavi.amap"), ("高德", "com.autonavi.amap"),
+    ("bilibili", "tv.danmaku.bilianime"), ("哔哩哔哩", "tv.danmaku.bilianime"),
+    ("抖音", "com.ss.iphone.ugc.Aweme"),
+    ("微博", "com.sina.weibo"), ("weibo", "com.sina.weibo"),
+    ("小红书", "com.xingin.discover"),
+    ("知乎", "com.zhihu.ios"), ("zhihu", "com.zhihu.ios"),
+    ("设置", "com.apple.Preferences"), ("系统设置", "com.apple.Preferences"),
+    ("settings", "com.apple.Preferences"), ("system settings", "com.apple.Preferences"),
+    ("相机", "com.apple.camera"), ("camera", "com.apple.camera"),
+    ("照片", "com.apple.mobileslideshow"), ("photos", "com.apple.mobileslideshow"),
+    ("备忘录", "com.apple.mobilenotes"), ("notes", "com.apple.mobilenotes"),
+    ("计算器", "com.apple.calculator"), ("calculator", "com.apple.calculator"),
+    ("时钟", "com.apple.mobiletimer"), ("clock", "com.apple.mobiletimer"),
+    ("地图", "com.apple.Maps"), ("maps", "com.apple.Maps"),
+    ("邮件", "com.apple.mobilemail"), ("mail", "com.apple.mobilemail"),
+    ("日历", "com.apple.mobilecal"), ("calendar", "com.apple.mobilecal"),
+    ("天气", "com.apple.weather"), ("weather", "com.apple.weather"),
+    ("音乐", "com.apple.Music"), ("music", "com.apple.Music"),
+    ("safari", "com.apple.mobilesafari"),
+    ("app store", "com.apple.AppStore"),
+  ]
+
   static func bundleID(for value: String, apps: [[String: String]] = []) -> String? {
     let wanted = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !wanted.isEmpty else { return nil }
+    // 已经是包名格式就直接用，不做任何猜测。
     if wanted.range(of: #"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"#, options: .regularExpression) != nil {
       return wanted
     }
-    if ["设置", "系统设置", "settings", "system settings"].contains(wanted.lowercased()) { return "com.apple.Preferences" }
-    return apps.first { $0["name"]?.caseInsensitiveCompare(wanted) == .orderedSame }?["id"]
+    // 别名表（名字精确匹配，忽略大小写）。
+    if let alias = aliases.first(where: { $0.name.caseInsensitiveCompare(wanted) == .orderedSame }) {
+      return alias.id
+    }
+    // 真实列表：先按名字，再按包名兜一次。
+    if let hit = apps.first(where: { $0["name"]?.caseInsensitiveCompare(wanted) == .orderedSame }) {
+      return hit["id"]
+    }
+    return nil
   }
 }
 
