@@ -123,19 +123,41 @@ final class IOSPhoneCoreActions {
       }
       if plan.method == .open, let application {
         let opened = try await send(["op": "launch", "bundleId": application], execution, current: live)
-        guard await consent.waitForTarget(request, current: live) else {
-          throw IOSPhoneOperationError(message: "系统已接受应用启动请求；" + consent.targetWaitFailureMessage)
-        }
-        let reply = try await capture(execution, current: live)
-        let output = try await observe(reply, execution, image: false, detail: false, current: live)
+        // 打开应用不再等「目标到前台」。
+        //
+        // 以前这里 await waitForTarget 再截屏，两个问题叠加：真后台 tweak 下
+        // 真实前台可能长时间仍是 DSH Go，waitForTarget 会一直等到超时；就算
+        // 等到了，后面截屏失败也会把「已经启动成功」判成整个 open 失败——
+        // 于是「打开微信」这种最简单的动作也做不成。
+        //
+        // 启动请求被系统接受就是成功。前台核实与截屏是附加信息，拿不到
+        // 也不该否定已经发生的事实。
         lastOpenedApplication = application
-        return IOSPhoneOutcome(text: "启动请求已派发（pid=\(opened.metadata.pid ?? 0)，前台 App 未核实）。\n" + output.text,
-          isError: false, image: nil)
+        var summary = "启动请求已派发（pid=\(opened.metadata.pid ?? 0)）。"
+        if let front = IOSPhoneCoreDevice.frontmostBundleID() {
+          summary += front == application
+            ? "目标应用已在前台。"
+            : "当前前台是 \(front)，目标可能还在启动。"
+        } else {
+          summary += "前台未核实。"
+        }
+        // 尽力截一张，失败就明说，不让它影响 open 的结果。
+        if let reply = try? await capture(execution, current: live),
+          let output = try? await observe(reply, execution, image: false, detail: false, current: live) {
+          summary += "\n" + output.text
+        } else {
+          summary += "\n（这一次没有读到屏幕内容；需要时再单独读屏。）"
+        }
+        return IOSPhoneOutcome(text: summary, isError: false, image: nil)
       }
-      guard await consent.waitForTarget(request, current: live) else {
-        throw IOSPhoneOperationError(message: consent.targetWaitFailureMessage)
+      // 读屏不再要求目标应用占着屏幕（见 capture 的注释）。
+      // 需要「目标已就位」的只有点按、输入这类会改别人状态的动作。
+      if plan.requiresObservation {
+        guard await consent.waitForTarget(request, current: live) else {
+          throw IOSPhoneOperationError(message: consent.targetWaitFailureMessage)
+        }
+        try requireBackground(live)
       }
-      try requireBackground(live)
       let fresh = try await capture(execution, current: live)
       if plan.method == .screen {
         let output = try await observe(fresh, execution, image: plan.wantsImage, detail: plan.detail, current: live)
@@ -367,16 +389,33 @@ final class IOSPhoneCoreActions {
   }
 
   private func capture(_ execution: Execution, current: @escaping () -> Bool) async throws -> IOSPhoneCoreReply {
-    try requireBackground(current)
+    // 读屏不再要求「别的 App 占着屏幕」。
+    //
+    // 以前这里调 requireBackground，于是用户在自己聊天界面里说「读屏」时直接
+    // 被拒（那时 DSH Go 就是前台），报的还是「目标界面已改变」。结果是只有切到
+    // 目标 App 之后才读得了屏，而那时用户既看不到结果也打不了字。
+    //
+    // 越狱通道的 _UICreateScreenUIImage 本来就抓整屏，截谁在前台都能出图。
+    // 「别读错东西」这件事交给结果里报告的真实前台，由模型判断，而不是
+    // 在截屏前把整次调用挡掉。
+    try require(current)
     return try await send(["op": "screenshot"], execution, current: current)
   }
 
   private func send(_ values: [String: Any], _ execution: Execution,
                     current: @escaping () -> Bool) async throws -> IOSPhoneCoreReply {
     try require(current)
-    let needsBackground = values["nativeFrameId"] != nil || values["op"] as? String == "screenshot"
-    // 只要别的 App 真的占着屏幕就够。宠物画中画已从这条通道移除：越狱机的真后台
-    // 插件负责让进程活下去，保活不再是抓屏的条件。
+    // 读屏（screenshot）不再要求「别的 App 占着屏幕」。
+    //
+    // 越狱通道抓的是整屏，谁在前台都能出图。以前把 screenshot 也算进
+    // needsBackground，用户在 App 里说「读屏」就必然被拒，报的是
+    //「现在屏幕上的是 com.xxx.dshgo，不是要读的目标应用」——而用户要读的
+    // 往往正是当下这一屏。
+    //
+    // 真正需要「目标在前面」的只有会改动别人状态的动作（点按、滚动、输入），
+    // 那些走 plan.requiresObservation 的判断，不在这里。
+    let isScreen = values["op"] as? String == "screenshot"
+    let needsBackground = !isScreen && values["nativeFrameId"] != nil
     let permitted = { current() && (!needsBackground || IOSPhoneCoreDevice.otherAppInFront) }
     guard permitted() else {
       // 说清「现在屏幕上是谁」：真实前台 App 不是我们就放行，是我们就直说，
