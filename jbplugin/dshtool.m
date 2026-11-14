@@ -256,6 +256,43 @@ static int DshSnapNotify(const char *name) {
   return 0;
 }
 
+
+// 滑动：按下 → 连续移动 → 抬起。
+//
+// 和「长按」不同，滑动的特点就是坐标一直在变，系统看得到位置在推进，
+// 不会像静止触摸那样被判成「没有后续事件」。所以这条路比长按有希望。
+static int DshSwipe(CGFloat x1, CGFloat y1, CGFloat x2, CGFloat y2, int durationMs) {
+  if (!DshLoadIOKit()) { printf("IOKit fail\n"); return 2; }
+  int dur = durationMs > 0 ? durationMs : 300;
+  CFTypeRef client = gSystemCreate ? gSystemCreate(kCFAllocatorDefault) : NULL;
+  if (!client) { printf("client nil\n"); return 2; }
+  if (gSetProp) gSetProp(client, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+
+  CFTypeRef down = DshMakeEventPhase(x1, y1, DshPhaseBegin);
+  if (!down) { printf("down nil\n"); CFRelease(client); return 2; }
+  gDispatch(client, down);
+  CFRelease(down);
+
+  // 60fps 插值，共 dur 毫秒。
+  int steps = dur / 16;
+  if (steps < 4) steps = 4;
+  for (int i = 1; i <= steps; i++) {
+    usleep(16 * 1000);
+    CGFloat t = (CGFloat)i / (CGFloat)steps;
+    CGFloat cx = x1 + (x2 - x1) * t;
+    CGFloat cy = y1 + (y2 - y1) * t;
+    CFTypeRef mv = DshMakeEventPhase(cx, cy, DshPhaseMove);
+    if (mv) { gDispatch(client, mv); CFRelease(mv); }
+  }
+
+  CFTypeRef up = DshMakeEventPhase(x2, y2, DshPhaseEnd);
+  if (up) { gDispatch(client, up); CFRelease(up); }
+  CFRelease(client);
+  printf("滑动 (%g,%g) → (%g,%g) 用时 %dms，%d 步\n",
+         (double)x1, (double)y1, (double)x2, (double)y2, dur, steps);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
@@ -301,6 +338,15 @@ int main(int argc, char *argv[]) {
     if ([cmd isEqualToString:@"snapnotify"]) {
       if (argc < 3) return 64;
       return DshSnapNotify(argv[2]);
+    }
+    if ([cmd isEqualToString:@"swipe"]) {
+      if (argc < 6) {
+        printf("用法: swipe x1 y1 x2 y2 [ms]\n");
+        return 64;
+      }
+      return DshSwipe(atof(argv[2]), atof(argv[3]),
+                      atof(argv[4]), atof(argv[5]),
+                      argc > 6 ? atoi(argv[6]) : 300);
     }
     if ([cmd isEqualToString:@"hold"]) {
       if (argc < 4) return 64;
