@@ -19,8 +19,13 @@ permissions:
   contents: read
 
 concurrency:
+  # 同时只留一个构建，但不要取消正在跑的那个：一次编译要二十多分钟，
+  # 中途掐掉等于白等。新来的排队，跑完的自然结束。
+  #
+  # 手动触发和 push 会各起一个 run，它们落在同一个组里，所以手动触发只在
+  # 队列为空时才需要（见下面 rebuild 脚本）。
   group: ios-build-ipa-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   ipa:
