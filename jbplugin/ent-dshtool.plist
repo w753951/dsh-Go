@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- dshtool 以 root 从 sshd 启动，需要平台级授权才能：
+	     1) 用 UIGetScreenImage 拿到整个屏幕（沙盒进程只能拿到自己）
+	     2) 向系统 HID 事件流派发点按与滑动 -->
+	<key>platform-application</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-dispatch</key>
+	<true/>
+	<key>com.apple.springboard.launchapplications</key>
+	<true/>
+</dict>
+</plist>
