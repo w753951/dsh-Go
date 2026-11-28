@@ -197,6 +197,14 @@ jobs:
             [ -e "$src/$item" ] && cp "$src/$item" "$dest/" || true
           done
           rm -f "$dest/lib/default-prompt-inject.md"
+          # 目录名必须和 Dart 侧 BuiltinPlugins.bundled 里的名字一致，
+          # 否则 App 启动时找不到源目录，插件会被静默跳过（以前就是
+          # bundled 写 'dsh-purge'、这里打包成 dsh-purge-community，
+          # 结果破甲一直没被加载）。包名也必须是这个。
+          name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dest/package.json" | head -1)"
+          if [ "$name" != "dsh-purge-community" ]; then
+            echo "::error title=plugin::dsh-purge 的 package.json name=$name，与 packed 目录名 dsh-purge-community 不一致，App 侧找不到它"; exit 1
+          fi
           # 主入口必须在，否则装上也启用不了。
           test -f "$dest/lib/index.js" || {
             echo '::error title=plugin::dsh-purge 的 lib/index.js 没落进包里'; exit 1; }
@@ -276,7 +284,7 @@ jobs:
           import json, pathlib, sys
           root = pathlib.Path(sys.argv[1])
           wanted = {
-              "dsh-purge": ("破甲", "Purge", "shield"),
+              "dsh-purge-community": ("破甲", "Purge", "shield"),
               "dsh-our-free-model": ("免费模型", "Free Models", "sparkles"),
               "@ccch1mneyyy/dsh-media": ("图像与视频", "Images and Video", "image"),
           }
@@ -309,6 +317,43 @@ jobs:
               if got != zh:
                   print(f"::error title=plugin:: {rel} 的 title 没写成（{got!r}）")
                   rc = 1
+          sys.exit(rc)
+          PY
+
+      - name: Verify every built-in plugin matches the Dart list
+        run: |
+          # 上线前最后一道闸：包里实际有的插件目录，必须和 Dart 侧
+          # BuiltinPlugins.bundled 的清单一一对上。
+          #
+          # 破甲一直没被加载，根因就是这两边脱节：Dart 写 'dsh-purge'、
+          # CI 打包成 'dsh-purge-community'。Dart 里 existsSync() 判否后
+          # 静默 continue，构建照样成功、IPA 照样出包，装上去才发现插件没了。
+          # 以前只在真机上才能发现，现在让它在 CI 里直接红。
+          python3 - <<"PY"
+          import pathlib, re, sys
+          app = pathlib.Path("app")
+          src = (app / "lib/runtime/builtin_plugins.dart").read_text(encoding="utf-8")
+          block = re.search(r"static const List<String> bundled = \[(.*?)\];", src, re.S)
+          if not block:
+              print("::error title=plugin::builtin_plugins.dart 里找不到 bundled 清单"); sys.exit(1)
+          # 去掉行注释，再抓引号里的目录名。
+          body = "\n".join(l.split("//")[0] for l in block.group(1).splitlines())
+          declared = re.findall(r"'([^']+)'", body)
+          root = pathlib.Path("app/build/ios/iphoneos/Runner.app/builtin-plugins")
+          rc = 0
+          print("Dart 清单:", declared)
+          for rel in declared:
+              d = root / rel
+              if not (d / "package.json").is_file():
+                  print(f"::error title=plugin::Dart 要求 {rel}，但包里没有 {rel}/package.json"); rc = 1
+              else:
+                  print(f"  ok  {rel}")
+          # 反向：包里有、Dart 没声明的，也提示出来（不算失败，可能是素材）。
+          present = sorted(str(p.relative_to(root)) for p in root.rglob("package.json"))
+          for rel in present:
+              rel = rel[:-len("/package.json")] if rel != "package.json" else ""
+              if rel and rel not in declared:
+                  print(f"::warning title=plugin:: 包里有 {rel}，但 Dart 清单没声明，不会注入 profile")
           sys.exit(rc)
           PY
       - name: Sign with the HID entitlement

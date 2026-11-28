@@ -32,7 +32,15 @@ class BuiltinPlugins {
   /// 复制进 profile 的 node_modules 并登记到 package.json。
   static const List<String> bundled = [
     'dsh-our-free-model',
-    'dsh-purge',
+    // 破甲（purge）：npm 包名是 dsh-purge-community，不是 dsh-purge。
+    // CI 的 Bundle dsh-purge 步骤就是按这个目录名打包的
+    // （见 .github/workflows/ios-compile.yml：dest=.../dsh-purge-community），
+    // 上游 kingcharleslzy-ai/dsh-purge 的 package.json name 也是它。
+    // 这里以前写成 'dsh-purge'，源目录永远 existsSync()=false，于是整条
+    // 静默跳过：包里有目录、profile 里没有、bundle 也没登记，界面上就是
+    // 「dsh-purge 没被加载」。名字必须和 CI 打包目录严格一致。
+    // 注意 bin 里的 dsh-purge 只是可执行文件名，不能拿来当目录名。
+    'dsh-purge-community',
     // 图像与视频：带 scope 的目录名，源码在 runtime/media/dsh-media，
     // 由 .github/workflows/ios-compile.yml 内置进 Runner.app/builtin-plugins。
     '@ccch1mneyyy/dsh-media',
@@ -43,6 +51,14 @@ class BuiltinPlugins {
 
   /// app bundle 里存放内置插件的位置（由 CI 复制进去）。
   static const String bundleFolder = 'builtin-plugins';
+
+  /// 包内插件源根，`_ensure` 里确定后供改名清理复用。
+  static String? _sourceRoot;
+
+  /// 改过目录名的插件：旧名 → 现名。装机升级时要清掉 profile 里的旧残留。
+  static const Map<String, String> _renamed = {
+    'dsh-purge': 'dsh-purge-community',
+  };
 
   /// 最近一次执行的诊断结果，供设置页展示。
   static String lastResult = '尚未执行';
@@ -113,6 +129,7 @@ class BuiltinPlugins {
       steps.add('缺 $bundleFolder');
       return;
     }
+    _sourceRoot = sourceRoot.path;
     final available = sourceRoot
         .listSync()
         .whereType<Directory>()
@@ -142,6 +159,7 @@ class BuiltinPlugins {
 
     final names = <String>[];
     final seeded = <String>[];
+    final missing = <String>[];
     for (final entity in profiles.listSync()) {
       if (entity is! Directory) continue;
       final name = entity.path.split('/').last;
@@ -153,9 +171,16 @@ class BuiltinPlugins {
         steps.add('创建 $name/node_modules');
         modules.createSync(recursive: true);
       }
+      _dropRenamed(entity.path, modules, name, steps);
       for (final plugin in bundled) {
         final source = Directory('${sourceRoot.path}/$plugin');
-        if (!source.existsSync()) continue;
+        // 源目录不在说明 CI 没把它打进包，或者 bundled 与打包目录名脱节。
+        // 以前是 continue 静默跳过，结果插件永远装不上还看不出来。
+        if (!source.existsSync()) {
+          missing.add(plugin);
+          steps.add('缺源目录 $bundleFolder/$plugin（CI 没打进包，或 bundled 名字写错）');
+          continue;
+        }
         final target = Directory('${modules.path}/$plugin');
         // 比内容，不比「目录在不在」：装上新 IPA 后包里的插件已经换版，
         // 只看目录存不存在会永远留着 profile 里第一次装进去的那份，改了什么
@@ -177,9 +202,70 @@ class BuiltinPlugins {
     if (names.isEmpty) {
       lastResult = 'profiles 下没有任何 profile 目录';
     } else if (seeded.isEmpty) {
-      lastResult = '包内缺少插件源目录';
+      lastResult = '包内缺少插件源目录${missing.isEmpty ? '' : '：${missing.join(',')}'}';
+    } else if (missing.isNotEmpty) {
+      // 有装上也有缺的：主结果仍报成功，但把缺的写清楚，别让人以为都好了。
+      lastResult =
+          '已写入 ${seeded.join(',')} → ${names.join(',')}；缺 ${missing.join(',')}；重启本机引擎后生效';
     } else {
       lastResult = '已写入 ${seeded.join(',')} → ${names.join(',')}；重启本机引擎后生效';
+    }
+  }
+
+  /// 插件改过目录名时，把 profile 里旧名字的残留清掉。
+  ///
+  /// 破甲从 `dsh-purge` 改成 `dsh-purge-community` 后，老用户 profile 的
+  /// node_modules 里会留着一份旧目录，bundle 列表里也留着旧名字；不清掉的话
+  /// 引擎可能按旧名去解析，表现为「装了新版还是旧的」。
+  static void _dropRenamed(
+    String profile,
+    Directory modules,
+    String name,
+    List<String> steps,
+  ) {
+    for (final entry in _renamed.entries) {
+      final legacy = entry.key;
+      final current = entry.value;
+      if (!bundled.contains(current)) continue;
+      final stale = Directory('${modules.path}/$legacy');
+      // 只删「旧名在、新名也已经由包里提供」的情况，免得把用户自己
+      // 装的旧版删掉却补不回新版。
+      if (!stale.existsSync()) continue;
+      final source = Directory('${_sourceRoot ?? ''}/$current');
+      if (!source.existsSync()) continue;
+      try {
+        stale.deleteSync(recursive: true);
+        steps.add('清理旧目录 $legacy（已改名为 $current）');
+      } catch (error) {
+        steps.add('清理旧目录 $legacy 失败: $error');
+        continue;
+      }
+      _unregister(profile, legacy, steps);
+    }
+  }
+
+  /// 把旧名字从 profile 的 bundle 列表里去掉。
+  static void _unregister(String profile, String name, List<String> steps) {
+    try {
+      final manifest = File('$profile/package.json');
+      if (!manifest.existsSync()) return;
+      final decoded = jsonDecode(manifest.readAsStringSync());
+      if (decoded is! Map<String, dynamic>) return;
+      final dsh = decoded['dsh'];
+      if (dsh is! Map<String, dynamic>) return;
+      final section = dsh['profile'];
+      if (section is! Map<String, dynamic>) return;
+      final bundles = section['bundles'];
+      if (bundles is! List || !bundles.contains(name)) return;
+      bundles.remove(name);
+      section['bundles'] = bundles;
+      manifest.writeAsStringSync(
+        const JsonEncoder.withIndent('  ').convert(decoded),
+        flush: true,
+      );
+      steps.add('从 bundle 列表移除旧名 $name');
+    } catch (error) {
+      steps.add('移除旧名 $name 失败: $error');
     }
   }
 
